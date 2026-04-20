@@ -311,6 +311,7 @@ class Engine:
     async def _check_and_act(self, sp: StreamProcess):
         alive = await sp.check_health()
         prev_mode = sp.mode
+        logger.info(f"[{sp.name}] Health: alive={alive}, mode={sp.mode.value}, failures={sp.consecutive_failures}")
 
         if alive:
             sp.consecutive_failures = 0
