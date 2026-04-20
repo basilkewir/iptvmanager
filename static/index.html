@@ -267,6 +267,23 @@ BBC One|http://source.com/bbc1.m3u8|bbc1|2"></textarea>
     <input id="m-key" placeholder="cnn_hd">
     <label>DVR Retention (hours)</label>
     <input id="m-dvr" type="number" value="2" min="1" max="168">
+    <label>Logo Position</label>
+    <select id="m-logo-pos">
+      <option value="top-left">↖ Top Left</option>
+      <option value="top-right" selected>↗ Top Right</option>
+      <option value="bottom-left">↙ Bottom Left</option>
+      <option value="bottom-right">↘ Bottom Right</option>
+      <option value="center">⊕ Center</option>
+    </select>
+    <div id="logo-upload-section" style="display:none;margin-top:14px;padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px">
+      <label style="margin:0 0 8px 0">🖼️ Channel Logo</label>
+      <div id="logo-current" style="margin-bottom:8px;font-size:.82rem;color:var(--muted)"></div>
+      <input type="file" id="m-logo-file" accept="image/*" style="font-size:.82rem">
+      <div style="margin-top:8px;display:flex;gap:6px">
+        <button type="button" class="btn btn-sm btn-primary" onclick="uploadLogo()">Upload Logo</button>
+        <button type="button" class="btn btn-sm btn-danger" id="btn-remove-logo" style="display:none" onclick="removeLogo()">Remove Logo</button>
+      </div>
+    </div>
     <div class="checkbox-row">
       <input type="checkbox" id="m-enabled" checked>
       <label for="m-enabled" style="margin:0;color:var(--text)">Enabled (start monitoring immediately)</label>
@@ -409,7 +426,7 @@ function renderStreams(){
         <div class="stream-detail"><span class="label">UDP Output:</span> <span class="value">${esc(s.udp_target||'N/A')}</span></div>
         <div class="stream-detail"><span class="label">Key:</span> <span class="value">${esc(s.rtmp_key)}</span></div>
         <div class="stream-detail"><span class="label">DVR:</span> <span class="value">${s.dvr_hours}h (${s.dvr_segments||0} segments)</span></div>
-        <div class="stream-detail"><span class="label">Failures:</span> <span class="value">${s.consecutive_failures}</span></div>
+        <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? '🖼️ ' + (s.logo_position||'top-right') : '—'}</span></div>
         <div class="stream-detail"><span class="label">Last Online:</span> <span class="value">${s.last_online ? new Date(s.last_online).toLocaleString() : 'Never'}</span></div>
       </div>
       <div class="dvr-bar"><div class="dvr-bar-fill" style="width:${dvrPct}%" title="DVR buffer: ${dvrPct}%"></div></div>
@@ -462,7 +479,9 @@ function openAddModal(){
   document.getElementById('m-source').value = '';
   document.getElementById('m-key').value = '';
   document.getElementById('m-dvr').value = '2';
+  document.getElementById('m-logo-pos').value = 'top-right';
   document.getElementById('m-enabled').checked = true;
+  document.getElementById('logo-upload-section').style.display = 'none';
   document.getElementById('modal').classList.add('active');
 }
 async function openEditModal(id){
@@ -474,7 +493,21 @@ async function openEditModal(id){
   document.getElementById('m-source').value = s.source_url;
   document.getElementById('m-key').value = s.rtmp_key;
   document.getElementById('m-dvr').value = s.dvr_hours;
+  document.getElementById('m-logo-pos').value = s.logo_position || 'top-right';
   document.getElementById('m-enabled').checked = s.enabled;
+  // Show logo section for existing streams
+  const logoSec = document.getElementById('logo-upload-section');
+  logoSec.style.display = 'block';
+  const logoCur = document.getElementById('logo-current');
+  const btnRm = document.getElementById('btn-remove-logo');
+  if(s.logo_path){
+    logoCur.innerHTML = '✅ Logo active: <strong>' + esc(s.logo_path.split(/[/\\]/).pop()) + '</strong>';
+    btnRm.style.display = 'inline-flex';
+  } else {
+    logoCur.textContent = 'No logo set';
+    btnRm.style.display = 'none';
+  }
+  document.getElementById('m-logo-file').value = '';
   document.getElementById('modal').classList.add('active');
 }
 function closeModal(){ document.getElementById('modal').classList.remove('active'); }
@@ -488,6 +521,7 @@ async function saveStream(){
     dvr_hours: parseInt(document.getElementById('m-dvr').value)||2,
     enabled: document.getElementById('m-enabled').checked,
     dvr_enabled: true,
+    logo_position: document.getElementById('m-logo-pos').value,
   };
   if(!body.name||!body.source_url||!body.rtmp_key){ toast('Please fill in all fields','error'); return; }
   try {
@@ -501,6 +535,31 @@ async function saveStream(){
     closeModal();
     loadStreams();
   } catch(e){ toast(e.message, 'error'); }
+}
+
+async function uploadLogo(){
+  if(!editingId){ toast('Save the stream first, then edit to upload logo','error'); return; }
+  const fileInput = document.getElementById('m-logo-file');
+  if(!fileInput.files.length){ toast('Select an image file','error'); return; }
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  try {
+    const r = await api('/api/streams/'+editingId+'/logo', {method:'POST', body:fd});
+    if(!r.ok){ const d=await r.json(); throw new Error(d.detail||'Upload failed'); }
+    toast('Logo uploaded — stream will restart with overlay');
+    loadStreams();
+    openEditModal(editingId);
+  } catch(e){ toast(e.message,'error'); }
+}
+
+async function removeLogo(){
+  if(!editingId) return;
+  try {
+    await api('/api/streams/'+editingId+'/logo', {method:'DELETE'});
+    toast('Logo removed');
+    loadStreams();
+    openEditModal(editingId);
+  } catch(e){ toast(e.message,'error'); }
 }
 
 async function deleteStream(id){

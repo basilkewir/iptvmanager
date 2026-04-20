@@ -1,13 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
+import os
+import shutil
 
 from app.database import get_db
 from app.models import Stream, StreamLog, User
 from app.schemas import StreamCreate, StreamUpdate, StreamOut
 from app.auth import get_current_user
 from app.engine import engine
+
+LOGO_DIR = os.path.join("data", "logos")
+os.makedirs(LOGO_DIR, exist_ok=True)
 
 router = APIRouter(prefix="/api/streams", tags=["streams"])
 
@@ -24,6 +29,8 @@ def _stream_out(s: Stream) -> StreamOut:
         udp_target=_udp_for(s),
         last_online=s.last_online.isoformat() if s.last_online else None,
         consecutive_failures=s.consecutive_failures or 0,
+        logo_path=s.logo_path,
+        logo_position=s.logo_position or "top-right",
     )
 
 @router.get("/", response_model=List[StreamOut])
@@ -60,10 +67,59 @@ async def delete_stream(stream_id: int, db: AsyncSession = Depends(get_db), _: U
     s = result.scalar_one_or_none()
     if not s:
         raise HTTPException(404, "Stream not found")
+    # Clean up logo file
+    if s.logo_path and os.path.isfile(s.logo_path):
+        try:
+            os.remove(s.logo_path)
+        except Exception:
+            pass
     await engine.remove_stream(stream_id)
     await db.execute(delete(Stream).where(Stream.id == stream_id))
     await db.commit()
     return {"ok": True}
+
+@router.post("/{stream_id}/logo", response_model=StreamOut)
+async def upload_logo(stream_id: int, file: UploadFile = File(...),
+                      db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(Stream).where(Stream.id == stream_id))
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(404, "Stream not found")
+    ext = os.path.splitext(file.filename or "logo.png")[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+        raise HTTPException(400, "Logo must be an image (png/jpg/bmp/webp)")
+    # Remove old logo
+    if s.logo_path and os.path.isfile(s.logo_path):
+        try:
+            os.remove(s.logo_path)
+        except Exception:
+            pass
+    logo_filename = f"{s.rtmp_key}{ext}"
+    logo_full = os.path.join(LOGO_DIR, logo_filename)
+    with open(logo_full, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    s.logo_path = os.path.abspath(logo_full)
+    await db.commit()
+    await db.refresh(s)
+    await engine.update_stream(s)
+    return _stream_out(s)
+
+@router.delete("/{stream_id}/logo", response_model=StreamOut)
+async def delete_logo(stream_id: int, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(Stream).where(Stream.id == stream_id))
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(404, "Stream not found")
+    if s.logo_path and os.path.isfile(s.logo_path):
+        try:
+            os.remove(s.logo_path)
+        except Exception:
+            pass
+    s.logo_path = None
+    await db.commit()
+    await db.refresh(s)
+    await engine.update_stream(s)
+    return _stream_out(s)
 
 @router.get("/status")
 async def all_status(_: User = Depends(get_current_user)):

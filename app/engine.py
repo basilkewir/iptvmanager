@@ -31,13 +31,16 @@ class StreamProcess:
     """Wraps FFmpeg subprocesses + state for one stream channel."""
 
     def __init__(self, stream_id: int, name: str, source_url: str,
-                 rtmp_key: str, dvr_hours: int, udp_target: str):
+                 rtmp_key: str, dvr_hours: int, udp_target: str,
+                 logo_path: str = None, logo_position: str = "top-right"):
         self.stream_id = stream_id
         self.name = name
         self.source_url = source_url
         self.rtmp_key = rtmp_key
         self.dvr_hours = dvr_hours
-        self.udp_target = udp_target  # e.g. udp://239.0.0.1:5001?pkt_size=1316&ttl=16
+        self.udp_target = udp_target
+        self.logo_path = logo_path
+        self.logo_position = logo_position
         self.output_process: Optional[asyncio.subprocess.Process] = None
         self.recorder_process: Optional[asyncio.subprocess.Process] = None
         self.mode: StreamStatus = StreamStatus.STOPPED
@@ -93,6 +96,22 @@ class StreamProcess:
             logger.warning(f"[{self.name}] health check error: {e}")
             return False
 
+    # ── logo overlay helper ────────────────────────────────────────────
+    def _has_logo(self) -> bool:
+        return bool(self.logo_path) and os.path.isfile(self.logo_path)
+
+    def _overlay_expr(self) -> str:
+        """Return FFmpeg overlay position expression."""
+        pad = 10
+        pos = {
+            "top-left":     f"{pad}:{pad}",
+            "top-right":    f"main_w-overlay_w-{pad}:{pad}",
+            "bottom-left":  f"{pad}:main_h-overlay_h-{pad}",
+            "bottom-right": f"main_w-overlay_w-{pad}:main_h-overlay_h-{pad}",
+            "center":       "(main_w-overlay_w)/2:(main_h-overlay_h)/2",
+        }
+        return pos.get(self.logo_position, pos["top-right"])
+
     # ── LIVE: source → UDP multicast ─────────────────────────────────────
     async def start_live_output(self):
         """Push live source directly to UDP multicast."""
@@ -105,12 +124,15 @@ class StreamProcess:
             else:
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5"]
-            cmd += [
-                "-i", self.source_url,
-                "-c", "copy",
-                "-f", "mpegts",
-                self.udp_target,
-            ]
+            cmd += ["-i", self.source_url]
+            if self._has_logo():
+                cmd += ["-i", self.logo_path,
+                        "-filter_complex", f"[0:v][1:v]overlay={self._overlay_expr()}",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                        "-c:a", "copy"]
+            else:
+                cmd += ["-c", "copy"]
+            cmd += ["-f", "mpegts", self.udp_target]
             logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -176,10 +198,15 @@ class StreamProcess:
                 "-stream_loop", "-1",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_path,
-                "-c", "copy",
-                "-f", "mpegts",
-                self.udp_target,
             ]
+            if self._has_logo():
+                cmd += ["-i", self.logo_path,
+                        "-filter_complex", f"[0:v][1:v]overlay={self._overlay_expr()}",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                        "-c:a", "copy"]
+            else:
+                cmd += ["-c", "copy"]
+            cmd += ["-f", "mpegts", self.udp_target]
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -292,7 +319,10 @@ class Engine:
 
     def _register(self, s: Stream) -> StreamProcess:
         udp = self._make_udp_target(s)
-        sp = StreamProcess(s.id, s.name, s.source_url, s.rtmp_key, s.dvr_hours, udp)
+        sp = StreamProcess(
+            s.id, s.name, s.source_url, s.rtmp_key, s.dvr_hours, udp,
+            logo_path=s.logo_path, logo_position=s.logo_position or "top-right",
+        )
         self.streams[s.id] = sp
         logger.info(f"Registered stream [{s.name}] → {udp}")
         return sp
