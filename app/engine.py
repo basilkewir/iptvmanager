@@ -51,14 +51,25 @@ class StreamProcess:
     async def check_health(self) -> bool:
         """Return True if source stream is alive."""
         try:
-            # Quick ffprobe check
-            proc = await asyncio.create_subprocess_exec(
+            cmd = [
                 settings.FFPROBE_PATH,
                 "-v", "error",
-                "-rtsp_transport", "tcp",
                 "-i", self.source_url,
                 "-show_entries", "stream=codec_type",
                 "-of", "csv=p=0",
+            ]
+            # Add RTSP transport only for rtsp:// sources
+            if self.source_url.lower().startswith("rtsp://"):
+                cmd = [
+                    settings.FFPROBE_PATH,
+                    "-v", "error",
+                    "-rtsp_transport", "tcp",
+                    "-i", self.source_url,
+                    "-show_entries", "stream=codec_type",
+                    "-of", "csv=p=0",
+                ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -71,8 +82,12 @@ class StreamProcess:
                     proc.kill()
                 except Exception:
                     pass
+                logger.debug(f"[{self.name}] health check timed out")
                 return False
-            return proc.returncode == 0 and len(stdout.strip()) > 0
+            alive = proc.returncode == 0 and len(stdout.strip()) > 0
+            if not alive:
+                logger.debug(f"[{self.name}] health check failed: rc={proc.returncode} stderr={stderr.decode(errors='ignore')[:200]}")
+            return alive
         except Exception as e:
             logger.warning(f"[{self.name}] health check error: {e}")
             return False
@@ -85,17 +100,48 @@ class StreamProcess:
             logger.info(f"[{self.name}] Starting LIVE push → {self.rtmp_target}")
             cmd = [
                 settings.FFMPEG_PATH,
-                "-re", "-i", self.source_url,
+                "-re",
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-i", self.source_url,
                 "-c", "copy",
                 "-f", "flv",
                 self.rtmp_target,
             ]
+            # For RTSP sources, use different flags
+            if self.source_url.lower().startswith("rtsp://"):
+                cmd = [
+                    settings.FFMPEG_PATH,
+                    "-re",
+                    "-rtsp_transport", "tcp",
+                    "-i", self.source_url,
+                    "-c", "copy",
+                    "-f", "flv",
+                    self.rtmp_target,
+                ]
+            logger.info(f"[{self.name}] FFmpeg cmd: {' '.join(cmd)}")
             self.process = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
             )
+            # Monitor FFmpeg stderr in background for debugging
+            asyncio.create_task(self._monitor_ffmpeg(self.process, "live"))
             self.mode = StreamStatus.LIVE
             self.consecutive_failures = 0
             self.last_online = datetime.now(timezone.utc)
+
+    async def _monitor_ffmpeg(self, proc: asyncio.subprocess.Process, label: str):
+        """Read FFmpeg stderr for logging/debugging."""
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                msg = line.decode(errors="ignore").strip()
+                if msg:
+                    logger.debug(f"[{self.name}] ffmpeg({label}): {msg}")
+        except Exception:
+            pass
 
     # ── start DVR recording (only while live) ────────────────────────────
     async def start_dvr_recording(self):

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     FLUSSONIC_RTMP_BASE: str = "rtmp://localhost/live"
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: str = "DEBUG"
 
     class Config:
         env_file = ".env"
