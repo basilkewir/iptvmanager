@@ -111,8 +111,10 @@ class StreamProcess:
         Returns (extra_input_args, filter_and_codec_args) for logo overlay.
         Scales logo to 150px wide (keeps aspect ratio), handles alpha,
         and loops the image so it never runs out of frames.
+        -framerate 25 on the logo input ensures the filter graph has a
+        consistent frame rate to sync against the live source.
         """
-        extra_in = ["-loop", "1", "-i", self.logo_path]
+        extra_in = ["-loop", "1", "-framerate", "25", "-i", self.logo_path]
         filt = (
             f"[1:v]format=rgba,scale=150:-1[logo];"
             f"[0:v][logo]overlay={self._overlay_expr()}"
@@ -134,21 +136,24 @@ class StreamProcess:
             await self._kill_output()
             logger.info(f"[{self.name}] Starting LIVE → {self.udp_target}")
             cmd = [settings.FFMPEG_PATH]
+            has_logo = self._has_logo()
             if self.source_url.lower().startswith("rtsp://"):
                 cmd += ["-rtsp_transport", "tcp"]
             else:
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5"]
-            # -re is an INPUT option — paces reading to real-time rate,
-            # preventing burst delivery from HTTP/HLS sources flooding UDP
+            # -re paces input to real-time — only safe in copy mode.
+            # When transcoding (logo overlay), libx264 paces itself and
+            # -re causes frame-timing conflicts with the looped image input.
+            if not has_logo:
+                cmd += ["-re"]
             cmd += [
-                "-re",
                 "-fflags", "+genpts+discardcorrupt",
                 "-analyzeduration", "2000000",
                 "-probesize", "2000000",
                 "-i", self.source_url,
             ]
-            if self._has_logo():
+            if has_logo:
                 extra_in, codec_args = self._build_logo_filter()
                 cmd += extra_in + codec_args
             else:
