@@ -111,21 +111,39 @@ class StreamProcess:
         async with self.lock:
             await self._kill_output()
             logger.info(f"[{self.name}] Starting LIVE → {self.udp_target}")
-            cmd = [settings.FFMPEG_PATH, "-re"]
+            cmd = [settings.FFMPEG_PATH]
+            # Input options — no -re for live sources (source paces us)
             if self.source_url.lower().startswith("rtsp://"):
                 cmd += ["-rtsp_transport", "tcp"]
             else:
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5"]
-            cmd += ["-i", self.source_url]
+            cmd += [
+                "-fflags", "+genpts+discardcorrupt",
+                "-analyzeduration", "2000000",
+                "-probesize", "2000000",
+                "-i", self.source_url,
+            ]
             if self._has_logo():
-                cmd += ["-i", self.logo_path,
-                        "-filter_complex", f"[0:v][1:v]overlay={self._overlay_expr()}",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                        "-c:a", "copy"]
+                cmd += [
+                    "-i", self.logo_path,
+                    "-filter_complex",
+                    f"[0:v][1:v]overlay={self._overlay_expr()}:shortest=1",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-tune", "zerolatency",
+                    "-b:v", "4000k", "-maxrate", "4500k", "-bufsize", "8000k",
+                    "-g", "50", "-keyint_min", "25",
+                    "-c:a", "aac", "-b:a", "128k",
+                ]
             else:
                 cmd += ["-c", "copy"]
-            cmd += ["-f", "mpegts", self.udp_target]
+            cmd += [
+                "-f", "mpegts",
+                "-mpegts_flags", "+resend_headers",
+                "-pcr_period", "20",
+                "-max_interleave_delta", "0",
+                self.udp_target,
+            ]
             logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -148,11 +166,14 @@ class StreamProcess:
             if self.source_url.lower().startswith("rtsp://"):
                 cmd += ["-rtsp_transport", "tcp"]
             cmd += [
+                "-fflags", "+genpts+discardcorrupt",
                 "-i", self.source_url,
                 "-c", "copy",
                 "-f", "segment",
                 "-segment_time", str(settings.DVR_SEGMENT_DURATION),
+                "-segment_format", "mpegts",
                 "-reset_timestamps", "1",
+                "-break_non_keyframes", "0",
                 seg_path,
             ]
             self.recorder_process = await asyncio.create_subprocess_exec(
@@ -188,18 +209,31 @@ class StreamProcess:
             cmd = [
                 settings.FFMPEG_PATH,
                 "-re",
+                "-fflags", "+genpts+igndts",
                 "-stream_loop", "-1",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_path,
             ]
             if self._has_logo():
-                cmd += ["-i", self.logo_path,
-                        "-filter_complex", f"[0:v][1:v]overlay={self._overlay_expr()}",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                        "-c:a", "copy"]
+                cmd += [
+                    "-i", self.logo_path,
+                    "-filter_complex",
+                    f"[0:v][1:v]overlay={self._overlay_expr()}:shortest=1",
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-tune", "zerolatency",
+                    "-b:v", "4000k", "-maxrate", "4500k", "-bufsize", "8000k",
+                    "-g", "50", "-keyint_min", "25",
+                    "-c:a", "aac", "-b:a", "128k",
+                ]
             else:
                 cmd += ["-c", "copy"]
-            cmd += ["-f", "mpegts", self.udp_target]
+            cmd += [
+                "-f", "mpegts",
+                "-mpegts_flags", "+resend_headers",
+                "-pcr_period", "20",
+                "-max_interleave_delta", "0",
+                self.udp_target,
+            ]
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
