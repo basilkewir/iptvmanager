@@ -16,7 +16,8 @@ class StreamCreate(BaseModel):
     enabled: bool = True
     dvr_enabled: bool = True
     dvr_hours: int = 2
-    logo_position: str = "top-right"
+    logo_x: int = 10
+    logo_y: int = 10
 
 class StreamUpdate(BaseModel):
     name: Optional[str] = None
@@ -25,7 +26,8 @@ class StreamUpdate(BaseModel):
     enabled: Optional[bool] = None
     dvr_enabled: Optional[bool] = None
     dvr_hours: Optional[int] = None
-    logo_position: Optional[str] = None
+    logo_x: Optional[int] = None
+    logo_y: Optional[int] = None
 
 class StreamOut(BaseModel):
     id: int
@@ -40,7 +42,8 @@ class StreamOut(BaseModel):
     last_online: Optional[str] = None
     consecutive_failures: int = 0
     logo_path: Optional[str] = None
-    logo_position: str = "top-right"
+    logo_x: int = 10
+    logo_y: int = 10
 
     class Config:
         from_attributes = True

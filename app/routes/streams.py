@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
+from typing import List, Optional
 import os
 import shutil
+import httpx
 
 from app.database import get_db
 from app.models import Stream, StreamLog, User
@@ -30,7 +31,8 @@ def _stream_out(s: Stream) -> StreamOut:
         last_online=s.last_online.isoformat() if s.last_online else None,
         consecutive_failures=s.consecutive_failures or 0,
         logo_path=s.logo_path,
-        logo_position=s.logo_position or "top-right",
+        logo_x=s.logo_x if s.logo_x is not None else 10,
+        logo_y=s.logo_y if s.logo_y is not None else 10,
     )
 
 @router.get("/", response_model=List[StreamOut])
@@ -79,25 +81,48 @@ async def delete_stream(stream_id: int, db: AsyncSession = Depends(get_db), _: U
     return {"ok": True}
 
 @router.post("/{stream_id}/logo", response_model=StreamOut)
-async def upload_logo(stream_id: int, file: UploadFile = File(...),
-                      db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def upload_logo(stream_id: int,
+                      file: Optional[UploadFile] = File(None),
+                      logo_url: Optional[str] = Form(None),
+                      db: AsyncSession = Depends(get_db),
+                      _: User = Depends(get_current_user)):
     result = await db.execute(select(Stream).where(Stream.id == stream_id))
     s = result.scalar_one_or_none()
     if not s:
         raise HTTPException(404, "Stream not found")
-    ext = os.path.splitext(file.filename or "logo.png")[1].lower()
-    if ext not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
-        raise HTTPException(400, "Logo must be an image (png/jpg/bmp/webp)")
     # Remove old logo
     if s.logo_path and os.path.isfile(s.logo_path):
         try:
             os.remove(s.logo_path)
         except Exception:
             pass
-    logo_filename = f"{s.rtmp_key}{ext}"
-    logo_full = os.path.join(LOGO_DIR, logo_filename)
-    with open(logo_full, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    if file and file.filename:
+        # Upload from file browse
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+            raise HTTPException(400, "Logo must be an image (png/jpg/bmp/webp)")
+        logo_filename = f"{s.rtmp_key}{ext}"
+        logo_full = os.path.join(LOGO_DIR, logo_filename)
+        with open(logo_full, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+    elif logo_url and logo_url.strip():
+        # Download from URL
+        logo_url = logo_url.strip()
+        ext = os.path.splitext(logo_url.split("?")[0])[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+            ext = ".png"
+        logo_filename = f"{s.rtmp_key}{ext}"
+        logo_full = os.path.join(LOGO_DIR, logo_filename)
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(logo_url)
+                r.raise_for_status()
+                with open(logo_full, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            raise HTTPException(400, f"Failed to download logo: {e}")
+    else:
+        raise HTTPException(400, "Provide a file or a logo_url")
     s.logo_path = os.path.abspath(logo_full)
     await db.commit()
     await db.refresh(s)

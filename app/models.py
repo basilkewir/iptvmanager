@@ -31,7 +31,8 @@ class Stream(Base):
     last_checked = Column(DateTime(timezone=True), nullable=True)
     consecutive_failures = Column(Integer, default=0)
     logo_path = Column(String(255), nullable=True)
-    logo_position = Column(String(20), default="top-right")  # top-left, top-right, bottom-left, bottom-right, center
+    logo_x = Column(Integer, default=10)
+    logo_y = Column(Integer, default=10)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class StreamLog(Base):

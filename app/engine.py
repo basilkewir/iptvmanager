@@ -32,7 +32,7 @@ class StreamProcess:
 
     def __init__(self, stream_id: int, name: str, source_url: str,
                  rtmp_key: str, dvr_hours: int, udp_target: str,
-                 logo_path: str = None, logo_position: str = "top-right"):
+                 logo_path: str = None, logo_x: int = 10, logo_y: int = 10):
         self.stream_id = stream_id
         self.name = name
         self.source_url = source_url
@@ -40,7 +40,8 @@ class StreamProcess:
         self.dvr_hours = dvr_hours
         self.udp_target = udp_target
         self.logo_path = logo_path
-        self.logo_position = logo_position
+        self.logo_x = logo_x
+        self.logo_y = logo_y
         self.output_process: Optional[asyncio.subprocess.Process] = None
         self.recorder_process: Optional[asyncio.subprocess.Process] = None
         self.mode: StreamStatus = StreamStatus.STOPPED
@@ -101,16 +102,8 @@ class StreamProcess:
         return bool(self.logo_path) and os.path.isfile(self.logo_path)
 
     def _overlay_expr(self) -> str:
-        """Return FFmpeg overlay position expression."""
-        pad = 10
-        pos = {
-            "top-left":     f"{pad}:{pad}",
-            "top-right":    f"main_w-overlay_w-{pad}:{pad}",
-            "bottom-left":  f"{pad}:main_h-overlay_h-{pad}",
-            "bottom-right": f"main_w-overlay_w-{pad}:main_h-overlay_h-{pad}",
-            "center":       "(main_w-overlay_w)/2:(main_h-overlay_h)/2",
-        }
-        return pos.get(self.logo_position, pos["top-right"])
+        """Return FFmpeg overlay position expression using custom X/Y."""
+        return f"{self.logo_x}:{self.logo_y}"
 
     # ── LIVE: source → UDP multicast ─────────────────────────────────────
     async def start_live_output(self):
@@ -321,7 +314,9 @@ class Engine:
         udp = self._make_udp_target(s)
         sp = StreamProcess(
             s.id, s.name, s.source_url, s.rtmp_key, s.dvr_hours, udp,
-            logo_path=s.logo_path, logo_position=s.logo_position or "top-right",
+            logo_path=s.logo_path,
+            logo_x=s.logo_x if s.logo_x is not None else 10,
+            logo_y=s.logo_y if s.logo_y is not None else 10,
         )
         self.streams[s.id] = sp
         logger.info(f"Registered stream [{s.name}] → {udp}")

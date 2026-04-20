@@ -267,20 +267,23 @@ BBC One|http://source.com/bbc1.m3u8|bbc1|2"></textarea>
     <input id="m-key" placeholder="cnn_hd">
     <label>DVR Retention (hours)</label>
     <input id="m-dvr" type="number" value="2" min="1" max="168">
-    <label>Logo Position</label>
-    <select id="m-logo-pos">
-      <option value="top-left">↖ Top Left</option>
-      <option value="top-right" selected>↗ Top Right</option>
-      <option value="bottom-left">↙ Bottom Left</option>
-      <option value="bottom-right">↘ Bottom Right</option>
-      <option value="center">⊕ Center</option>
-    </select>
+    <div style="display:flex;gap:12px;margin-top:14px">
+      <div style="flex:1"><label>Logo X Position (px)</label><input id="m-logo-x" type="number" value="10" min="0"></div>
+      <div style="flex:1"><label>Logo Y Position (px)</label><input id="m-logo-y" type="number" value="10" min="0"></div>
+    </div>
     <div id="logo-upload-section" style="display:none;margin-top:14px;padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px">
       <label style="margin:0 0 8px 0">🖼️ Channel Logo</label>
       <div id="logo-current" style="margin-bottom:8px;font-size:.82rem;color:var(--muted)"></div>
-      <input type="file" id="m-logo-file" accept="image/*" style="font-size:.82rem">
-      <div style="margin-top:8px;display:flex;gap:6px">
-        <button type="button" class="btn btn-sm btn-primary" onclick="uploadLogo()">Upload Logo</button>
+      <div style="margin-bottom:8px">
+        <label style="margin:0;font-size:.82rem;color:var(--muted)">Browse file:</label>
+        <input type="file" id="m-logo-file" accept="image/*" style="font-size:.82rem">
+      </div>
+      <div style="margin-bottom:8px">
+        <label style="margin:0;font-size:.82rem;color:var(--muted)">Or paste image URL:</label>
+        <input id="m-logo-url" placeholder="https://example.com/logo.png" style="margin-top:4px">
+      </div>
+      <div style="display:flex;gap:6px">
+        <button type="button" class="btn btn-sm btn-primary" onclick="uploadLogo()">Apply Logo</button>
         <button type="button" class="btn btn-sm btn-danger" id="btn-remove-logo" style="display:none" onclick="removeLogo()">Remove Logo</button>
       </div>
     </div>
@@ -426,7 +429,7 @@ function renderStreams(){
         <div class="stream-detail"><span class="label">UDP Output:</span> <span class="value">${esc(s.udp_target||'N/A')}</span></div>
         <div class="stream-detail"><span class="label">Key:</span> <span class="value">${esc(s.rtmp_key)}</span></div>
         <div class="stream-detail"><span class="label">DVR:</span> <span class="value">${s.dvr_hours}h (${s.dvr_segments||0} segments)</span></div>
-        <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? '🖼️ ' + (s.logo_position||'top-right') : '—'}</span></div>
+        <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? '🖼️ x:' + s.logo_x + ' y:' + s.logo_y : '—'}</span></div>
         <div class="stream-detail"><span class="label">Last Online:</span> <span class="value">${s.last_online ? new Date(s.last_online).toLocaleString() : 'Never'}</span></div>
       </div>
       <div class="dvr-bar"><div class="dvr-bar-fill" style="width:${dvrPct}%" title="DVR buffer: ${dvrPct}%"></div></div>
@@ -479,7 +482,8 @@ function openAddModal(){
   document.getElementById('m-source').value = '';
   document.getElementById('m-key').value = '';
   document.getElementById('m-dvr').value = '2';
-  document.getElementById('m-logo-pos').value = 'top-right';
+  document.getElementById('m-logo-x').value = '10';
+  document.getElementById('m-logo-y').value = '10';
   document.getElementById('m-enabled').checked = true;
   document.getElementById('logo-upload-section').style.display = 'none';
   document.getElementById('modal').classList.add('active');
@@ -493,7 +497,8 @@ async function openEditModal(id){
   document.getElementById('m-source').value = s.source_url;
   document.getElementById('m-key').value = s.rtmp_key;
   document.getElementById('m-dvr').value = s.dvr_hours;
-  document.getElementById('m-logo-pos').value = s.logo_position || 'top-right';
+  document.getElementById('m-logo-x').value = s.logo_x ?? 10;
+  document.getElementById('m-logo-y').value = s.logo_y ?? 10;
   document.getElementById('m-enabled').checked = s.enabled;
   // Show logo section for existing streams
   const logoSec = document.getElementById('logo-upload-section');
@@ -508,6 +513,7 @@ async function openEditModal(id){
     btnRm.style.display = 'none';
   }
   document.getElementById('m-logo-file').value = '';
+  document.getElementById('m-logo-url').value = '';
   document.getElementById('modal').classList.add('active');
 }
 function closeModal(){ document.getElementById('modal').classList.remove('active'); }
@@ -521,7 +527,8 @@ async function saveStream(){
     dvr_hours: parseInt(document.getElementById('m-dvr').value)||2,
     enabled: document.getElementById('m-enabled').checked,
     dvr_enabled: true,
-    logo_position: document.getElementById('m-logo-pos').value,
+    logo_x: parseInt(document.getElementById('m-logo-x').value)||10,
+    logo_y: parseInt(document.getElementById('m-logo-y').value)||10,
   };
   if(!body.name||!body.source_url||!body.rtmp_key){ toast('Please fill in all fields','error'); return; }
   try {
@@ -540,13 +547,20 @@ async function saveStream(){
 async function uploadLogo(){
   if(!editingId){ toast('Save the stream first, then edit to upload logo','error'); return; }
   const fileInput = document.getElementById('m-logo-file');
-  if(!fileInput.files.length){ toast('Select an image file','error'); return; }
+  const urlInput = document.getElementById('m-logo-url').value.trim();
   const fd = new FormData();
-  fd.append('file', fileInput.files[0]);
+  if(fileInput.files.length){
+    fd.append('file', fileInput.files[0]);
+  } else if(urlInput){
+    fd.append('logo_url', urlInput);
+  } else {
+    toast('Browse a file or paste an image URL','error');
+    return;
+  }
   try {
     const r = await api('/api/streams/'+editingId+'/logo', {method:'POST', body:fd});
     if(!r.ok){ const d=await r.json(); throw new Error(d.detail||'Upload failed'); }
-    toast('Logo uploaded — stream will restart with overlay');
+    toast('Logo applied — stream will restart with overlay');
     loadStreams();
     openEditModal(editingId);
   } catch(e){ toast(e.message,'error'); }
