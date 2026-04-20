@@ -404,6 +404,21 @@ class Engine:
         if sp:
             await sp.stop()
 
+    async def stop_stream(self, stream_id: int):
+        """Stop a stream's FFmpeg processes without removing it from the engine."""
+        sp = self.streams.get(stream_id)
+        if sp:
+            await sp.stop()
+            await self._log(stream_id, "stopped", "Stream manually stopped")
+            await self._broadcast(sp)
+
+    async def start_stream(self, stream_id: int):
+        """Force-start a stopped/down stream immediately (skip health check delay)."""
+        sp = self.streams.get(stream_id)
+        if sp:
+            await self._check_and_act(sp)
+            await self._broadcast(sp)
+
     async def update_stream(self, s: Stream):
         await self.remove_stream(s.id)
         if s.enabled:

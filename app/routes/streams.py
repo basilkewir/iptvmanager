@@ -150,6 +150,30 @@ async def delete_logo(stream_id: int, db: AsyncSession = Depends(get_db), _: Use
 async def all_status(_: User = Depends(get_current_user)):
     return engine.get_all_status()
 
+@router.post("/{stream_id}/start")
+async def start_stream(stream_id: int, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(Stream).where(Stream.id == stream_id))
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(404, "Stream not found")
+    if not s.enabled:
+        s.enabled = True
+        await db.commit()
+        await db.refresh(s)
+        await engine.add_stream(s)
+    else:
+        await engine.start_stream(stream_id)
+    return {"ok": True, "action": "started"}
+
+@router.post("/{stream_id}/stop")
+async def stop_stream(stream_id: int, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(Stream).where(Stream.id == stream_id))
+    s = result.scalar_one_or_none()
+    if not s:
+        raise HTTPException(404, "Stream not found")
+    await engine.stop_stream(stream_id)
+    return {"ok": True, "action": "stopped"}
+
 @router.get("/dvr/summary")
 async def dvr_summary(_: User = Depends(get_current_user)):
     return engine.get_dvr_summary()

@@ -435,6 +435,10 @@ function renderStreams(){
       <div class="stream-header">
         <h3>${esc(s.name)} <span class="badge badge-${s.status}">${statusIcon(s.status)} ${s.status}</span></h3>
         <div class="stream-actions">
+          ${s.status === 'stopped' || s.status === 'down'
+            ? `<button class="btn btn-sm btn-success" onclick="startStream(${s.id})">▶ Start</button>`
+            : `<button class="btn btn-sm btn-warning" onclick="stopStream(${s.id})">⏹ Stop</button>`
+          }
           <button class="btn btn-sm btn-outline" onclick="viewLogs(${s.id},'${esc(s.name)}')">📋 Logs</button>
           <button class="btn btn-sm btn-outline" onclick="openEditModal(${s.id})">✏️ Edit</button>
           <button class="btn btn-sm btn-danger" onclick="deleteStream(${s.id})">🗑️</button>
@@ -589,6 +593,22 @@ async function removeLogo(){
     toast('Logo removed');
     loadStreams();
     openEditModal(editingId);
+  } catch(e){ toast(e.message,'error'); }
+}
+
+async function startStream(id){
+  try {
+    await api('/api/streams/'+id+'/start', {method:'POST'});
+    toast('Stream starting…');
+    setTimeout(loadStreams, 1500);
+  } catch(e){ toast(e.message,'error'); }
+}
+
+async function stopStream(id){
+  try {
+    await api('/api/streams/'+id+'/stop', {method:'POST'});
+    toast('Stream stopped');
+    setTimeout(loadStreams, 800);
   } catch(e){ toast(e.message,'error'); }
 }
 
