@@ -10,15 +10,17 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/iptvmanager.db"
     DVR_STORAGE_PATH: str = "./data/dvr"
     HEALTH_CHECK_INTERVAL: int = 5  # seconds
-    HEALTH_CHECK_TIMEOUT: int = 15  # seconds (HLS needs more time)
+    HEALTH_CHECK_TIMEOUT: int = 30  # seconds
     HEALTH_CHECK_FAILURES_BEFORE_DOWN: int = 3
-    DVR_SEGMENT_DURATION: int = 10  # seconds per .ts segment
-    DVR_RETENTION_HOURS: int = 24
-    FLUSSONIC_RTMP_BASE: str = "http://localhost:80"
-    FLUSSONIC_PUBLISH_FORMAT: str = "mpegts"  # "flv" for RTMP, "mpegts" for HTTP MPEG-TS
+    DVR_SEGMENT_DURATION: int = 6  # seconds per .ts segment
+    DVR_RETENTION_HOURS: int = 2   # keep 2 hours of DVR
+    UDP_MULTICAST_BASE: str = "udp://239.0.0.1"
+    UDP_MULTICAST_PORT_START: int = 5000
+    UDP_TTL: int = 16
+    UDP_BUFFER_SIZE: int = 1316
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"
-    LOG_LEVEL: str = "DEBUG"
+    LOG_LEVEL: str = "INFO"
 
     class Config:
         env_file = ".env"

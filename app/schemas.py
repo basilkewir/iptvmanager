@@ -15,7 +15,7 @@ class StreamCreate(BaseModel):
     rtmp_key: str
     enabled: bool = True
     dvr_enabled: bool = True
-    dvr_hours: int = 24
+    dvr_hours: int = 2
 
 class StreamUpdate(BaseModel):
     name: Optional[str] = None
@@ -34,6 +34,7 @@ class StreamOut(BaseModel):
     status: str
     dvr_enabled: bool
     dvr_hours: int
+    udp_target: Optional[str] = None
     last_online: Optional[str] = None
     consecutive_failures: int = 0
 

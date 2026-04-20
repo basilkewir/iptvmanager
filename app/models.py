@@ -26,7 +26,7 @@ class Stream(Base):
     enabled = Column(Boolean, default=True)
     status = Column(SAEnum(StreamStatus), default=StreamStatus.STOPPED)
     dvr_enabled = Column(Boolean, default=True)
-    dvr_hours = Column(Integer, default=24)
+    dvr_hours = Column(Integer, default=2)
     last_online = Column(DateTime(timezone=True), nullable=True)
     last_checked = Column(DateTime(timezone=True), nullable=True)
     consecutive_failures = Column(Integer, default=0)

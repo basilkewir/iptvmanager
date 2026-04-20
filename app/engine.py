@@ -1,17 +1,22 @@
 """
-Stream Engine — the core controller that manages health checks, FFmpeg processes,
-live→DVR failover, and RTMP push to Flussonic.
+Stream Engine — manages health checks, FFmpeg processes, DVR recording,
+live→DVR failover, and UDP multicast output.
+
+Architecture per stream:
+  - One FFmpeg process always outputs to UDP multicast (live OR dvr)
+  - One FFmpeg process records .ts segments while source is live
+  - Health checker runs every N seconds
+  - On source failure → kill live output, start DVR loop output (same UDP)
+  - On source recovery → kill DVR output, start live output (same UDP)
 """
 import asyncio
 import logging
 import os
-import signal
 import time
 import glob
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
-import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,34 +26,24 @@ from app.models import Stream, StreamStatus, StreamLog
 
 logger = logging.getLogger("engine")
 
-# ── per-stream runtime state ────────────────────────────────────────────────
+
 class StreamProcess:
-    """Wraps the FFmpeg subprocess + metadata for one stream."""
-    def __init__(self, stream_id: int, name: str, source_url: str, rtmp_key: str, dvr_hours: int):
+    """Wraps FFmpeg subprocesses + state for one stream channel."""
+
+    def __init__(self, stream_id: int, name: str, source_url: str,
+                 rtmp_key: str, dvr_hours: int, udp_target: str):
         self.stream_id = stream_id
         self.name = name
         self.source_url = source_url
         self.rtmp_key = rtmp_key
         self.dvr_hours = dvr_hours
-        self.process: Optional[asyncio.subprocess.Process] = None
-        self.dvr_process: Optional[asyncio.subprocess.Process] = None
+        self.udp_target = udp_target  # e.g. udp://239.0.0.1:5001?pkt_size=1316&ttl=16
+        self.output_process: Optional[asyncio.subprocess.Process] = None
+        self.recorder_process: Optional[asyncio.subprocess.Process] = None
         self.mode: StreamStatus = StreamStatus.STOPPED
         self.consecutive_failures = 0
         self.last_online: Optional[datetime] = None
         self.lock = asyncio.Lock()
-
-    @property
-    def rtmp_target(self) -> str:
-        base = settings.FLUSSONIC_RTMP_BASE.rstrip("/")
-        fmt = settings.FLUSSONIC_PUBLISH_FORMAT
-        if fmt == "mpegts":
-            return f"{base}/{self.rtmp_key}/publish"
-        else:
-            return f"{base}/{self.rtmp_key}"
-
-    @property
-    def output_format(self) -> str:
-        return settings.FLUSSONIC_PUBLISH_FORMAT
 
     @property
     def dvr_dir(self) -> str:
@@ -58,30 +53,18 @@ class StreamProcess:
 
     # ── health check ─────────────────────────────────────────────────────
     async def check_health(self) -> bool:
-        """Return True if source stream is alive."""
+        """Return True if source stream is alive and producing media."""
         try:
-            cmd = [
-                settings.FFPROBE_PATH,
-                "-v", "error",
+            cmd = [settings.FFPROBE_PATH, "-v", "error"]
+            if self.source_url.lower().startswith("rtsp://"):
+                cmd += ["-rtsp_transport", "tcp"]
+            cmd += [
                 "-analyzeduration", "5000000",
                 "-probesize", "5000000",
                 "-i", self.source_url,
                 "-show_entries", "stream=codec_type",
                 "-of", "csv=p=0",
             ]
-            # Add RTSP transport only for rtsp:// sources
-            if self.source_url.lower().startswith("rtsp://"):
-                cmd = [
-                    settings.FFPROBE_PATH,
-                    "-v", "error",
-                    "-rtsp_transport", "tcp",
-                    "-analyzeduration", "5000000",
-                    "-probesize", "5000000",
-                    "-i", self.source_url,
-                    "-show_entries", "stream=codec_type",
-                    "-of", "csv=p=0",
-                ]
-            logger.info(f"[{self.name}] Probing: {self.source_url}")
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -96,58 +79,148 @@ class StreamProcess:
                     proc.kill()
                 except Exception:
                     pass
-                logger.info(f"[{self.name}] health check TIMED OUT after {settings.HEALTH_CHECK_TIMEOUT}s")
+                logger.info(f"[{self.name}] health check TIMED OUT")
                 return False
+
             alive = proc.returncode == 0 and len(stdout.strip()) > 0
             if alive:
-                logger.info(f"[{self.name}] health check OK: {stdout.decode(errors='ignore').strip()[:100]}")
+                logger.info(f"[{self.name}] health check OK")
             else:
-                logger.info(f"[{self.name}] health check FAILED: rc={proc.returncode} stderr={stderr.decode(errors='ignore')[:300]}")
+                stderr_msg = stderr.decode(errors="ignore").strip()[:200]
+                logger.info(f"[{self.name}] health check FAILED: rc={proc.returncode} {stderr_msg}")
             return alive
         except Exception as e:
             logger.warning(f"[{self.name}] health check error: {e}")
             return False
 
-    # ── start live push ──────────────────────────────────────────────────
-    async def start_live(self):
+    # ── LIVE: source → UDP multicast ─────────────────────────────────────
+    async def start_live_output(self):
+        """Push live source directly to UDP multicast."""
         async with self.lock:
-            await self._kill_process()
-            await self._kill_dvr_playback()
-            logger.info(f"[{self.name}] Starting LIVE push → {self.rtmp_target}")
-            cmd = [
-                settings.FFMPEG_PATH,
-                "-re",
-                "-reconnect", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "5",
+            await self._kill_output()
+            logger.info(f"[{self.name}] Starting LIVE → {self.udp_target}")
+            cmd = [settings.FFMPEG_PATH, "-re"]
+            if self.source_url.lower().startswith("rtsp://"):
+                cmd += ["-rtsp_transport", "tcp"]
+            else:
+                cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
+                        "-reconnect_delay_max", "5"]
+            cmd += [
                 "-i", self.source_url,
                 "-c", "copy",
-                "-f", self.output_format,
-                self.rtmp_target,
+                "-f", "mpegts",
+                self.udp_target,
             ]
-            # For RTSP sources, use different input flags
-            if self.source_url.lower().startswith("rtsp://"):
-                cmd = [
-                    settings.FFMPEG_PATH,
-                    "-re",
-                    "-rtsp_transport", "tcp",
-                    "-i", self.source_url,
-                    "-c", "copy",
-                    "-f", self.output_format,
-                    self.rtmp_target,
-                ]
-            logger.info(f"[{self.name}] FFmpeg cmd: {' '.join(cmd)}")
-            self.process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+            logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
+            self.output_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
-            # Monitor FFmpeg stderr in background for debugging
-            asyncio.create_task(self._monitor_ffmpeg(self.process, "live"))
+            asyncio.create_task(self._log_ffmpeg(self.output_process, "live-out"))
             self.mode = StreamStatus.LIVE
             self.consecutive_failures = 0
             self.last_online = datetime.now(timezone.utc)
 
-    async def _monitor_ffmpeg(self, proc: asyncio.subprocess.Process, label: str):
-        """Read FFmpeg stderr for logging/debugging."""
+    # ── DVR RECORDER: source → .ts segments (only while live) ────────────
+    async def start_dvr_recording(self):
+        """Record live source to local .ts segment files."""
+        async with self.lock:
+            await self._kill_recorder()
+            logger.info(f"[{self.name}] Starting DVR recording → {self.dvr_dir}")
+            seg_path = os.path.join(self.dvr_dir, "seg_%05d.ts")
+            cmd = [settings.FFMPEG_PATH]
+            if self.source_url.lower().startswith("rtsp://"):
+                cmd += ["-rtsp_transport", "tcp"]
+            cmd += [
+                "-i", self.source_url,
+                "-c", "copy",
+                "-f", "segment",
+                "-segment_time", str(settings.DVR_SEGMENT_DURATION),
+                "-reset_timestamps", "1",
+                seg_path,
+            ]
+            self.recorder_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            asyncio.create_task(self._log_ffmpeg(self.recorder_process, "dvr-rec"))
+
+    async def stop_dvr_recording(self):
+        async with self.lock:
+            await self._kill_recorder()
+            logger.info(f"[{self.name}] DVR recording stopped")
+
+    # ── DVR PLAYBACK: .ts segments → UDP multicast (failover) ────────────
+    async def start_dvr_playback(self):
+        """Loop recent DVR segments to UDP multicast."""
+        async with self.lock:
+            await self._kill_output()
+            await self._kill_recorder()
+            segments = self._get_recent_segments()
+            if not segments:
+                logger.warning(f"[{self.name}] No DVR segments — output goes dark")
+                self.mode = StreamStatus.DOWN
+                return
+
+            concat_path = os.path.join(self.dvr_dir, "playlist.txt")
+            with open(concat_path, "w") as f:
+                for seg in segments:
+                    f.write(f"file '{seg}'\n")
+
+            logger.info(f"[{self.name}] Starting DVR playback ({len(segments)} segments) → {self.udp_target}")
+            cmd = [
+                settings.FFMPEG_PATH,
+                "-re",
+                "-stream_loop", "-1",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_path,
+                "-c", "copy",
+                "-f", "mpegts",
+                self.udp_target,
+            ]
+            self.output_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            asyncio.create_task(self._log_ffmpeg(self.output_process, "dvr-play"))
+            self.mode = StreamStatus.DVR
+
+    # ── stop all ─────────────────────────────────────────────────────────
+    async def stop(self):
+        async with self.lock:
+            await self._kill_output()
+            await self._kill_recorder()
+            self.mode = StreamStatus.STOPPED
+
+    # ── internal helpers ─────────────────────────────────────────────────
+    async def _kill_output(self):
+        if self.output_process and self.output_process.returncode is None:
+            try:
+                self.output_process.terminate()
+                await asyncio.wait_for(self.output_process.wait(), timeout=5)
+            except Exception:
+                try:
+                    self.output_process.kill()
+                except Exception:
+                    pass
+            self.output_process = None
+
+    async def _kill_recorder(self):
+        if self.recorder_process and self.recorder_process.returncode is None:
+            try:
+                self.recorder_process.terminate()
+                await asyncio.wait_for(self.recorder_process.wait(), timeout=5)
+            except Exception:
+                try:
+                    self.recorder_process.kill()
+                except Exception:
+                    pass
+            self.recorder_process = None
+
+    async def _log_ffmpeg(self, proc: asyncio.subprocess.Process, label: str):
         try:
             while True:
                 line = await proc.stderr.readline()
@@ -159,124 +232,41 @@ class StreamProcess:
         except Exception:
             pass
 
-    # ── start DVR recording (only while live) ────────────────────────────
-    async def start_dvr_recording(self):
-        """Record live source to local .ts segments for DVR."""
-        async with self.lock:
-            await self._kill_dvr_recording()
-            logger.info(f"[{self.name}] Starting DVR recording")
-            seg_path = os.path.join(self.dvr_dir, "seg_%05d.ts")
-            cmd = [
-                settings.FFMPEG_PATH,
-                "-i", self.source_url,
-                "-c", "copy",
-                "-f", "segment",
-                "-segment_time", str(settings.DVR_SEGMENT_DURATION),
-                "-reset_timestamps", "1",
-                seg_path,
-            ]
-            self.dvr_process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-            )
-
-    async def _kill_dvr_recording(self):
-        if self.dvr_process and self.dvr_process.returncode is None:
-            try:
-                self.dvr_process.terminate()
-                await asyncio.wait_for(self.dvr_process.wait(), timeout=5)
-            except Exception:
-                try:
-                    self.dvr_process.kill()
-                except Exception:
-                    pass
-            self.dvr_process = None
-
-    # ── play DVR segments to RTMP (failover) ─────────────────────────────
-    async def start_dvr_playback(self):
-        """Loop recent DVR segments to RTMP so Flussonic keeps serving."""
-        async with self.lock:
-            await self._kill_process()
-            await self._kill_dvr_recording()
-            segments = self._get_recent_segments()
-            if not segments:
-                logger.warning(f"[{self.name}] No DVR segments available — nothing to play")
-                self.mode = StreamStatus.DOWN
-                return
-            # Build a concat file
-            concat_path = os.path.join(self.dvr_dir, "playlist.txt")
-            with open(concat_path, "w") as f:
-                for seg in segments:
-                    f.write(f"file '{seg}'\n")
-            logger.info(f"[{self.name}] Starting DVR playback ({len(segments)} segments) → {self.rtmp_target}")
-            cmd = [
-                settings.FFMPEG_PATH,
-                "-re",
-                "-stream_loop", "-1",       # loop forever until killed
-                "-f", "concat", "-safe", "0",
-                "-i", concat_path,
-                "-c", "copy",
-                "-f", self.output_format,
-                self.rtmp_target,
-            ]
-            self.process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-            )
-            self.mode = StreamStatus.DVR
-
-    async def _kill_dvr_playback(self):
-        """Kill the DVR playback (same process slot as live)."""
-        await self._kill_process()
-
-    # ── stop everything ──────────────────────────────────────────────────
-    async def stop(self):
-        async with self.lock:
-            await self._kill_process()
-            await self._kill_dvr_recording()
-            self.mode = StreamStatus.STOPPED
-
-    async def _kill_process(self):
-        if self.process and self.process.returncode is None:
-            try:
-                self.process.terminate()
-                await asyncio.wait_for(self.process.wait(), timeout=5)
-            except Exception:
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
-            self.process = None
-
-    # ── DVR segment helpers ──────────────────────────────────────────────
     def _get_recent_segments(self) -> list[str]:
-        """Return .ts files within DVR retention window, sorted by mtime."""
         cutoff = time.time() - (self.dvr_hours * 3600)
-        files = sorted(glob.glob(os.path.join(self.dvr_dir, "seg_*.ts")), key=os.path.getmtime)
+        files = sorted(
+            glob.glob(os.path.join(self.dvr_dir, "seg_*.ts")),
+            key=os.path.getmtime,
+        )
         return [f for f in files if os.path.getmtime(f) >= cutoff]
 
     def cleanup_old_segments(self):
         cutoff = time.time() - (self.dvr_hours * 3600)
+        removed = 0
         for f in glob.glob(os.path.join(self.dvr_dir, "seg_*.ts")):
             if os.path.getmtime(f) < cutoff:
                 try:
                     os.remove(f)
+                    removed += 1
                 except Exception:
                     pass
+        if removed:
+            logger.debug(f"[{self.name}] cleaned up {removed} old DVR segments")
 
 
-# ── Engine singleton ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
 class Engine:
     def __init__(self):
         self.streams: Dict[int, StreamProcess] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        self._ws_clients: list = []  # websocket broadcast list
+        self._ws_clients: list = []
 
     # ── lifecycle ─────────────────────────────────────────────────────────
     async def start(self):
         if self._running:
             return
         self._running = True
-        # Load enabled streams from DB
         async with async_session() as db:
             result = await db.execute(select(Stream).where(Stream.enabled == True))
             for s in result.scalars().all():
@@ -292,15 +282,23 @@ class Engine:
             await sp.stop()
         logger.info("Engine stopped")
 
-    # ── stream registration ───────────────────────────────────────────────
+    # ── stream management ─────────────────────────────────────────────────
+    def _make_udp_target(self, stream: Stream) -> str:
+        port = settings.UDP_MULTICAST_PORT_START + stream.id
+        return (
+            f"{settings.UDP_MULTICAST_BASE}:{port}"
+            f"?pkt_size={settings.UDP_BUFFER_SIZE}&ttl={settings.UDP_TTL}"
+        )
+
     def _register(self, s: Stream) -> StreamProcess:
-        sp = StreamProcess(s.id, s.name, s.source_url, s.rtmp_key, s.dvr_hours)
+        udp = self._make_udp_target(s)
+        sp = StreamProcess(s.id, s.name, s.source_url, s.rtmp_key, s.dvr_hours, udp)
         self.streams[s.id] = sp
+        logger.info(f"Registered stream [{s.name}] → {udp}")
         return sp
 
     async def add_stream(self, s: Stream):
         sp = self._register(s)
-        # immediately start monitoring
         await self._check_and_act(sp)
 
     async def remove_stream(self, stream_id: int):
@@ -319,32 +317,41 @@ class Engine:
             tasks = [self._check_and_act(sp) for sp in list(self.streams.values())]
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            # cleanup old DVR segments
             for sp in self.streams.values():
                 sp.cleanup_old_segments()
             await asyncio.sleep(settings.HEALTH_CHECK_INTERVAL)
 
     async def _check_and_act(self, sp: StreamProcess):
         alive = await sp.check_health()
-        prev_mode = sp.mode
-        logger.info(f"[{sp.name}] Health: alive={alive}, mode={sp.mode.value}, failures={sp.consecutive_failures}")
+        logger.info(
+            f"[{sp.name}] Health: alive={alive}, mode={sp.mode.value}, "
+            f"failures={sp.consecutive_failures}, udp={sp.udp_target}"
+        )
 
         if alive:
             sp.consecutive_failures = 0
             if sp.mode != StreamStatus.LIVE:
-                await sp.start_live()
+                # Source is up → switch to live + start recording
+                await sp.start_live_output()
                 await sp.start_dvr_recording()
-                await self._log(sp.stream_id, "live", "Source came online — switched to LIVE")
+                await self._log(sp.stream_id, "live",
+                                "Source online — streaming LIVE to UDP multicast")
                 await self._broadcast(sp)
         else:
             sp.consecutive_failures += 1
-            if sp.consecutive_failures >= settings.HEALTH_CHECK_FAILURES_BEFORE_DOWN and sp.mode == StreamStatus.LIVE:
-                logger.warning(f"[{sp.name}] Source DOWN after {sp.consecutive_failures} failures — switching to DVR")
+            threshold = settings.HEALTH_CHECK_FAILURES_BEFORE_DOWN
+            if sp.consecutive_failures >= threshold and sp.mode == StreamStatus.LIVE:
+                # Source died → switch to DVR playback
+                logger.warning(
+                    f"[{sp.name}] Source DOWN ({sp.consecutive_failures} failures) "
+                    f"— switching to DVR playback"
+                )
                 await sp.start_dvr_playback()
-                await self._log(sp.stream_id, "dvr", "Source went offline — switched to DVR playback")
+                await self._log(sp.stream_id, "dvr",
+                                "Source offline — playing DVR to UDP multicast")
                 await self._broadcast(sp)
 
-        # persist status in DB
+        # Persist to DB
         async with async_session() as db:
             await db.execute(
                 update(Stream)
@@ -366,7 +373,12 @@ class Engine:
             await db.commit()
 
     async def _broadcast(self, sp: StreamProcess):
-        data = {"stream_id": sp.stream_id, "name": sp.name, "status": sp.mode.value}
+        data = {
+            "stream_id": sp.stream_id,
+            "name": sp.name,
+            "status": sp.mode.value,
+            "udp_target": sp.udp_target,
+        }
         dead = []
         for ws in self._ws_clients:
             try:
@@ -392,6 +404,7 @@ class Engine:
                 "stream_id": sp.stream_id,
                 "name": sp.name,
                 "status": sp.mode.value,
+                "udp_target": sp.udp_target,
                 "consecutive_failures": sp.consecutive_failures,
                 "last_online": sp.last_online.isoformat() if sp.last_online else None,
                 "dvr_segments": len(sp._get_recent_segments()),

@@ -105,7 +105,7 @@ header h1::before{content:"📡"}
     <label>Name</label><input id="m-name" placeholder="CNN HD">
     <label>Source URL</label><input id="m-source" placeholder="http://source/stream.m3u8">
     <label>RTMP Key (unique)</label><input id="m-key" placeholder="cnn_hd">
-    <label>DVR Retention (hours)</label><input id="m-dvr" type="number" value="24">
+    <label>DVR Retention (hours)</label><input id="m-dvr" type="number" value="2">
     <label style="margin-top:12px"><input type="checkbox" id="m-enabled" checked> Enabled</label>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
@@ -197,7 +197,7 @@ function renderStreams(streams){
         <h3>${esc(s.name)} <span class="badge badge-${s.status}">${statusIcon(s.status)} ${s.status}</span></h3>
         <div class="stream-meta">
           <span>🔗 ${esc(s.source_url.substring(0,60))}${s.source_url.length>60?'...':''}</span>
-          <span>📺 ${esc(s.rtmp_key)}</span>
+          <span>� ${esc(s.udp_target||'')}</span>
           <span>💾 DVR ${s.dvr_hours}h</span>
           <span>⚠️ Failures: ${s.consecutive_failures}</span>
         </div>
@@ -243,7 +243,7 @@ function openAddModal(){
   document.getElementById('m-name').value = '';
   document.getElementById('m-source').value = '';
   document.getElementById('m-key').value = '';
-  document.getElementById('m-dvr').value = '24';
+  document.getElementById('m-dvr').value = '2';
   document.getElementById('m-enabled').checked = true;
   document.getElementById('modal').classList.add('active');
 }
@@ -267,7 +267,7 @@ async function saveStream(){
     name: document.getElementById('m-name').value,
     source_url: document.getElementById('m-source').value,
     rtmp_key: document.getElementById('m-key').value,
-    dvr_hours: parseInt(document.getElementById('m-dvr').value)||24,
+    dvr_hours: parseInt(document.getElementById('m-dvr').value)||2,
     enabled: document.getElementById('m-enabled').checked,
     dvr_enabled: true,
   };
