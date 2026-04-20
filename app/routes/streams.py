@@ -150,6 +150,17 @@ async def delete_logo(stream_id: int, db: AsyncSession = Depends(get_db), _: Use
 async def all_status(_: User = Depends(get_current_user)):
     return engine.get_all_status()
 
+@router.get("/dvr/summary")
+async def dvr_summary(_: User = Depends(get_current_user)):
+    return engine.get_dvr_summary()
+
+@router.get("/{stream_id}/dvr")
+async def stream_dvr(stream_id: int, _: User = Depends(get_current_user)):
+    info = engine.get_stream_dvr_detail(stream_id)
+    if info is None:
+        raise HTTPException(404, "Stream not found in engine")
+    return info
+
 @router.get("/{stream_id}/logs")
 async def stream_logs(stream_id: int, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     result = await db.execute(

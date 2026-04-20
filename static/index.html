@@ -169,6 +169,7 @@ header h1{font-size:1.4rem;display:flex;align-items:center;gap:8px}
       <div class="tab active" data-tab="streams" onclick="switchTab('streams')">📺 Streams</div>
       <div class="tab" data-tab="import" onclick="switchTab('import')">📥 Bulk Import</div>
       <div class="tab" data-tab="status" onclick="switchTab('status')">📊 Live Status</div>
+      <div class="tab" data-tab="dvr" onclick="switchTab('dvr')">💾 DVR Browser</div>
       <div class="tab" data-tab="settings" onclick="switchTab('settings')">⚙️ Settings</div>
     </div>
 
@@ -221,6 +222,20 @@ BBC One|http://source.com/bbc1.m3u8|bbc1|2"></textarea>
       <h2 style="margin-bottom:16px">📊 Real-Time Engine Status</h2>
       <div id="status-grid" class="streams-grid"></div>
       <div style="margin-top:12px"><button class="btn btn-outline btn-sm" onclick="loadStatus()">🔄 Refresh</button></div>
+    </div>
+
+    <!-- TAB: DVR Browser -->
+    <div class="tab-content" id="tab-dvr">
+      <h2 style="margin-bottom:16px">💾 DVR Recordings</h2>
+      <div id="dvr-summary-bar" class="stats-bar" style="margin-bottom:20px"></div>
+      <div id="dvr-channels"></div>
+      <div id="dvr-segments-panel" style="display:none;margin-top:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 id="dvr-seg-title" style="font-size:1rem">Segments</h3>
+          <button class="btn btn-sm btn-outline" onclick="closeDvrSegments()">✕ Close</button>
+        </div>
+        <div id="dvr-seg-list" style="max-height:400px;overflow-y:auto"></div>
+      </div>
     </div>
 
     <!-- TAB: Settings -->
@@ -378,6 +393,7 @@ function switchTab(name){
   document.querySelectorAll('.tab-content').forEach(t=>t.classList.toggle('active', t.id==='tab-'+name));
   if(name==='status') loadStatus();
   if(name==='settings') loadSettings();
+  if(name==='dvr') loadDvrBrowser();
 }
 
 // ── App init ──
@@ -665,6 +681,64 @@ async function loadSettings(){
   const h = Math.floor(up/3600), m = Math.floor((up%3600)/60), s = up%60;
   document.getElementById('s-uptime').textContent = `${h}h ${m}m ${s}s (page)`;
 }
+
+// ── DVR Browser ──
+function fmtSize(bytes){
+  if(bytes<1024) return bytes+' B';
+  if(bytes<1048576) return (bytes/1024).toFixed(1)+' KB';
+  if(bytes<1073741824) return (bytes/1048576).toFixed(1)+' MB';
+  return (bytes/1073741824).toFixed(2)+' GB';
+}
+async function loadDvrBrowser(){
+  try {
+    const data = await apiJson('/api/streams/dvr/summary');
+    const bar = document.getElementById('dvr-summary-bar');
+    const totalSize = data.reduce((a,c)=>a+c.total_size,0);
+    const totalSegs = data.reduce((a,c)=>a+c.segment_count,0);
+    bar.innerHTML = `
+      <div class="stat-card total"><div class="stat-value">${data.length}</div><div class="stat-label">Channels</div></div>
+      <div class="stat-card dvr"><div class="stat-value">${totalSegs}</div><div class="stat-label">Total Segments</div></div>
+      <div class="stat-card"><div class="stat-value" style="color:var(--accent)">${fmtSize(totalSize)}</div><div class="stat-label">Total DVR Size</div></div>
+    `;
+    const ch = document.getElementById('dvr-channels');
+    if(!data.length){ ch.innerHTML='<div style="color:var(--muted);padding:20px">No DVR data. Enable DVR on streams first.</div>'; return; }
+    ch.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:.85rem">
+      <thead><tr style="border-bottom:1px solid var(--border);text-align:left">
+        <th style="padding:10px">Channel</th><th style="padding:10px">Key</th><th style="padding:10px;text-align:right">Segments</th>
+        <th style="padding:10px;text-align:right">Size</th><th style="padding:10px">Oldest</th><th style="padding:10px">Newest</th><th style="padding:10px"></th>
+      </tr></thead><tbody>` + data.map(d=>`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:10px;font-weight:600">${esc(d.name)}</td>
+        <td style="padding:10px;color:var(--muted)">${esc(d.rtmp_key)}</td>
+        <td style="padding:10px;text-align:right">${d.segment_count}</td>
+        <td style="padding:10px;text-align:right">${fmtSize(d.total_size)}</td>
+        <td style="padding:10px;color:var(--muted)">${d.oldest ? new Date(d.oldest).toLocaleString() : '—'}</td>
+        <td style="padding:10px;color:var(--muted)">${d.newest ? new Date(d.newest).toLocaleString() : '—'}</td>
+        <td style="padding:10px"><button class="btn btn-sm btn-outline" onclick="viewDvrSegments(${d.stream_id},'${esc(d.name)}')">📂 Browse</button></td>
+      </tr>`).join('') + `</tbody></table>`;
+  } catch(e){ console.error(e); }
+}
+async function viewDvrSegments(id, name){
+  try {
+    const d = await apiJson('/api/streams/'+id+'/dvr');
+    document.getElementById('dvr-seg-title').textContent = '📂 '+name+' — '+d.segment_count+' segments ('+fmtSize(d.total_size)+')';
+    const list = document.getElementById('dvr-seg-list');
+    if(!d.segments.length){ list.innerHTML='<div style="color:var(--muted);padding:12px">No segments.</div>'; }
+    else {
+      list.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:.82rem">
+        <thead><tr style="border-bottom:1px solid var(--border);text-align:left">
+          <th style="padding:8px">#</th><th style="padding:8px">File</th><th style="padding:8px;text-align:right">Size</th><th style="padding:8px">Time</th>
+        </tr></thead><tbody>` + d.segments.map((s,i)=>`<tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:8px;color:var(--muted)">${i+1}</td>
+          <td style="padding:8px">${esc(s.name)}</td>
+          <td style="padding:8px;text-align:right">${fmtSize(s.size)}</td>
+          <td style="padding:8px;color:var(--muted)">${new Date(s.modified).toLocaleString()}</td>
+        </tr>`).join('') + `</tbody></table>`;
+    }
+    document.getElementById('dvr-segments-panel').style.display = 'block';
+    document.getElementById('dvr-segments-panel').scrollIntoView({behavior:'smooth'});
+  } catch(e){ toast('Failed to load segments','error'); }
+}
+function closeDvrSegments(){ document.getElementById('dvr-segments-panel').style.display = 'none'; }
 
 // ── Auto-refresh status every 10s ──
 setInterval(()=>{ if(allStreams.length) loadStreams(); }, 10000);

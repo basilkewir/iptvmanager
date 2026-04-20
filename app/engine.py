@@ -499,5 +499,67 @@ class Engine:
             for sp in self.streams.values()
         ]
 
+    def get_stream_dvr_detail(self, stream_id: int) -> dict | None:
+        sp = self.streams.get(stream_id)
+        if not sp:
+            return None
+        files = sorted(
+            glob.glob(os.path.join(sp.dvr_dir, "seg_*.ts")),
+            key=os.path.getmtime,
+        )
+        segments = []
+        total_size = 0
+        for f in files:
+            try:
+                sz = os.path.getsize(f)
+                mt = os.path.getmtime(f)
+                total_size += sz
+                segments.append({
+                    "name": os.path.basename(f),
+                    "size": sz,
+                    "modified": datetime.fromtimestamp(mt).isoformat(),
+                })
+            except OSError:
+                continue
+        return {
+            "stream_id": stream_id,
+            "name": sp.name,
+            "rtmp_key": sp.rtmp_key,
+            "segment_count": len(segments),
+            "total_size": total_size,
+            "oldest": segments[0]["modified"] if segments else None,
+            "newest": segments[-1]["modified"] if segments else None,
+            "segments": segments,
+        }
+
+    def get_dvr_summary(self) -> list[dict]:
+        results = []
+        for sp in self.streams.values():
+            files = glob.glob(os.path.join(sp.dvr_dir, "seg_*.ts"))
+            total_size = 0
+            oldest_t = None
+            newest_t = None
+            for f in files:
+                try:
+                    sz = os.path.getsize(f)
+                    mt = os.path.getmtime(f)
+                    total_size += sz
+                    if oldest_t is None or mt < oldest_t:
+                        oldest_t = mt
+                    if newest_t is None or mt > newest_t:
+                        newest_t = mt
+                except OSError:
+                    continue
+            results.append({
+                "stream_id": sp.stream_id,
+                "name": sp.name,
+                "rtmp_key": sp.rtmp_key,
+                "segment_count": len(files),
+                "total_size": total_size,
+                "oldest": datetime.fromtimestamp(oldest_t).isoformat() if oldest_t else None,
+                "newest": datetime.fromtimestamp(newest_t).isoformat() if newest_t else None,
+            })
+        return results
+
 
 engine = Engine()
