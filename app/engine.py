@@ -47,6 +47,7 @@ class StreamProcess:
         self.mode: StreamStatus = StreamStatus.STOPPED
         self.consecutive_failures = 0
         self.last_online: Optional[datetime] = None
+        self.dvr_started_at: Optional[datetime] = None   # when DVR playback began
         self.lock = asyncio.Lock()
 
     @property
@@ -189,6 +190,10 @@ class StreamProcess:
             cmd = [settings.FFMPEG_PATH]
             if self.source_url.lower().startswith("rtsp://"):
                 cmd += ["-rtsp_transport", "tcp"]
+            else:
+                # Auto-reconnect for HTTP/HLS sources — recorder survives brief glitches
+                cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
+                        "-reconnect_delay_max", "5"]
             cmd += [
                 "-fflags", "+genpts+discardcorrupt",
                 "-i", self.source_url,
@@ -224,12 +229,22 @@ class StreamProcess:
                 self.mode = StreamStatus.DOWN
                 return
 
+            # Write a snapshot playlist — only include segments that exist RIGHT NOW
+            # so FFmpeg doesn't crash when cleanup later removes old ones
             concat_path = os.path.join(self.dvr_dir, "playlist.txt")
+            # Keep only the most recent 30 min of segments for the loop to stay fresh
+            keep_secs = min(self.dvr_hours * 3600, 1800)
+            cutoff = time.time() - keep_secs
+            playlist_segs = [s for s in segments if os.path.getmtime(s) >= cutoff] or segments
             with open(concat_path, "w") as f:
-                for seg in segments:
+                for seg in playlist_segs:
                     f.write(f"file '{seg}'\n")
 
-            logger.info(f"[{self.name}] Starting DVR playback ({len(segments)} segments) → {self.udp_target}")
+            logger.info(
+                f"[{self.name}] Starting DVR playback "
+                f"({len(playlist_segs)} segments, {keep_secs//60:.0f} min window)"
+                f" → {self.udp_target}"
+            )
             cmd = [
                 settings.FFMPEG_PATH,
                 "-re",
@@ -256,6 +271,7 @@ class StreamProcess:
             )
             asyncio.create_task(self._log_ffmpeg(self.output_process, "dvr-play"))
             self.mode = StreamStatus.DVR
+            self.dvr_started_at = datetime.now(timezone.utc)
 
     # ── stop all ─────────────────────────────────────────────────────────
     async def stop(self):
@@ -310,6 +326,11 @@ class StreamProcess:
         return [f for f in files if os.path.getmtime(f) >= cutoff]
 
     def cleanup_old_segments(self):
+        # Don't delete segments while DVR playback is active —
+        # FFmpeg holds open file handles to the playlist files and will crash
+        # if any disappear. Cleanup resumes once we're back LIVE.
+        if self.mode == StreamStatus.DVR:
+            return
         cutoff = time.time() - (self.dvr_hours * 3600)
         removed = 0
         for f in glob.glob(os.path.join(self.dvr_dir, "seg_*.ts")):
@@ -438,9 +459,18 @@ class Engine:
                                 "Source offline — playing DVR to UDP multicast")
                 await self._broadcast(sp)
             elif sp.mode == StreamStatus.DVR:
-                # Already in DVR — make sure playback process is still running
-                if sp.output_process is None or sp.output_process.returncode is not None:
-                    logger.warning(f"[{sp.name}] DVR playback process died — restarting")
+                # Already in DVR playback while source is still down.
+                # Restart DVR if: process died OR playlist is >30 min old
+                # (refresh picks up newest segments and avoids deleted-file crashes)
+                playlist_age_secs = (
+                    (datetime.now(timezone.utc) - sp.dvr_started_at).total_seconds()
+                    if sp.dvr_started_at else 99999
+                )
+                process_dead = (sp.output_process is None or
+                                sp.output_process.returncode is not None)
+                if process_dead or playlist_age_secs >= 1800:
+                    reason = "process died" if process_dead else "30-min playlist refresh"
+                    logger.warning(f"[{sp.name}] DVR playback restarting ({reason})")
                     await sp.start_dvr_playback()
                     if sp.mode == StreamStatus.DOWN:
                         await self._log(sp.stream_id, "down",

@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     DVR_STORAGE_PATH: str = "./data/dvr"
     HEALTH_CHECK_INTERVAL: int = 5  # seconds
     HEALTH_CHECK_TIMEOUT: int = 30  # seconds
-    HEALTH_CHECK_FAILURES_BEFORE_DOWN: int = 3
+    HEALTH_CHECK_FAILURES_BEFORE_DOWN: int = 2  # 2×5s = 10s before DVR failover
     DVR_SEGMENT_DURATION: int = 6  # seconds per .ts segment
     DVR_RETENTION_HOURS: int = 2   # keep 2 hours of DVR
     UDP_MULTICAST_BASE: str = "udp://239.0.0.1"
