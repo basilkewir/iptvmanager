@@ -23,6 +23,17 @@ def _udp_for(s: Stream) -> str:
     return f"{settings.UDP_MULTICAST_BASE}:{port}"
 
 def _stream_out(s: Stream) -> StreamOut:
+    # Pull live DVR stats from the engine if stream is loaded
+    sp = engine.streams.get(s.id)
+    dvr_segs = 0
+    dvr_size_mb = 0.0
+    if sp:
+        segs = sp._get_recent_segments()
+        dvr_segs = len(segs)
+        try:
+            dvr_size_mb = round(sum(os.path.getsize(f) for f in segs) / 1048576, 2)
+        except Exception:
+            pass
     return StreamOut(
         id=s.id, name=s.name, source_url=s.source_url, rtmp_key=s.rtmp_key,
         enabled=s.enabled, status=s.status.value if s.status else "stopped",
@@ -33,6 +44,8 @@ def _stream_out(s: Stream) -> StreamOut:
         logo_path=s.logo_path,
         logo_x=s.logo_x if s.logo_x is not None else 10,
         logo_y=s.logo_y if s.logo_y is not None else 10,
+        dvr_segments=dvr_segs,
+        dvr_size_mb=dvr_size_mb,
     )
 
 @router.get("/", response_model=List[StreamOut])

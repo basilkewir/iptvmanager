@@ -448,7 +448,7 @@ function renderStreams(){
         <div class="stream-detail"><span class="label">Source:</span> <span class="value">${esc(s.source_url)}</span></div>
         <div class="stream-detail"><span class="label">UDP Output:</span> <span class="value">${esc(s.udp_target||'N/A')}</span></div>
         <div class="stream-detail"><span class="label">Key:</span> <span class="value">${esc(s.rtmp_key)}</span></div>
-        <div class="stream-detail"><span class="label">DVR:</span> <span class="value">${s.dvr_hours}h (${s.dvr_segments||0} segments)</span></div>
+        <div class="stream-detail"><span class="label">DVR:</span> <span class="value">${s.dvr_hours}h · ${s.dvr_segments||0} segs · ${s.dvr_size_mb||0} MB</span></div>
         <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? '🖼️ x:' + s.logo_x + ' y:' + s.logo_y : '—'}</span></div>
         <div class="stream-detail"><span class="label">Last Online:</span> <span class="value">${s.last_online ? new Date(s.last_online).toLocaleString() : 'Never'}</span></div>
       </div>

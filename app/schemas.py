@@ -44,6 +44,8 @@ class StreamOut(BaseModel):
     logo_path: Optional[str] = None
     logo_x: int = 10
     logo_y: int = 10
+    dvr_segments: int = 0
+    dvr_size_mb: float = 0.0
 
     class Config:
         from_attributes = True
