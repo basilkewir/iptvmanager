@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/iptvmanager.db"
     DVR_STORAGE_PATH: str = "./data/dvr"
     HEALTH_CHECK_INTERVAL: int = 5  # seconds
-    HEALTH_CHECK_TIMEOUT: int = 10  # seconds (HLS needs more time)
+    HEALTH_CHECK_TIMEOUT: int = 15  # seconds (HLS needs more time)
     HEALTH_CHECK_FAILURES_BEFORE_DOWN: int = 3
     DVR_SEGMENT_DURATION: int = 10  # seconds per .ts segment
     DVR_RETENTION_HOURS: int = 24

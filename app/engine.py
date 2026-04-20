@@ -54,6 +54,8 @@ class StreamProcess:
             cmd = [
                 settings.FFPROBE_PATH,
                 "-v", "error",
+                "-analyzeduration", "5000000",
+                "-probesize", "5000000",
                 "-i", self.source_url,
                 "-show_entries", "stream=codec_type",
                 "-of", "csv=p=0",
@@ -64,10 +66,13 @@ class StreamProcess:
                     settings.FFPROBE_PATH,
                     "-v", "error",
                     "-rtsp_transport", "tcp",
+                    "-analyzeduration", "5000000",
+                    "-probesize", "5000000",
                     "-i", self.source_url,
                     "-show_entries", "stream=codec_type",
                     "-of", "csv=p=0",
                 ]
+            logger.info(f"[{self.name}] Probing: {self.source_url}")
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -82,11 +87,13 @@ class StreamProcess:
                     proc.kill()
                 except Exception:
                     pass
-                logger.debug(f"[{self.name}] health check timed out")
+                logger.info(f"[{self.name}] health check TIMED OUT after {settings.HEALTH_CHECK_TIMEOUT}s")
                 return False
             alive = proc.returncode == 0 and len(stdout.strip()) > 0
-            if not alive:
-                logger.debug(f"[{self.name}] health check failed: rc={proc.returncode} stderr={stderr.decode(errors='ignore')[:200]}")
+            if alive:
+                logger.info(f"[{self.name}] health check OK: {stdout.decode(errors='ignore').strip()[:100]}")
+            else:
+                logger.info(f"[{self.name}] health check FAILED: rc={proc.returncode} stderr={stderr.decode(errors='ignore')[:300]}")
             return alive
         except Exception as e:
             logger.warning(f"[{self.name}] health check error: {e}")
