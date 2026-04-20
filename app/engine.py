@@ -133,7 +133,6 @@ class StreamProcess:
             await self._kill_output()
             logger.info(f"[{self.name}] Starting LIVE → {self.udp_target}")
             cmd = [settings.FFMPEG_PATH]
-            # Input options — no -re for live sources (source paces us)
             if self.source_url.lower().startswith("rtsp://"):
                 cmd += ["-rtsp_transport", "tcp"]
             else:
@@ -151,12 +150,24 @@ class StreamProcess:
             else:
                 cmd += ["-c", "copy"]
             cmd += [
+                # -re paces output to real-time rate — prevents UDP bursts
+                # from chunked HTTP/HLS sources which cause VLC/receiver stutter
+                "-re",
                 "-f", "mpegts",
                 "-mpegts_flags", "+resend_headers",
                 "-pcr_period", "20",
-                "-max_interleave_delta", "0",
                 self.udp_target,
             ]
+            logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
+            self.output_process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            asyncio.create_task(self._log_ffmpeg(self.output_process, "live-out"))
+            self.mode = StreamStatus.LIVE
+            self.consecutive_failures = 0
+            self.last_online = datetime.now(timezone.utc)
             logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -236,7 +247,6 @@ class StreamProcess:
                 "-f", "mpegts",
                 "-mpegts_flags", "+resend_headers",
                 "-pcr_period", "20",
-                "-max_interleave_delta", "0",
                 self.udp_target,
             ]
             self.output_process = await asyncio.create_subprocess_exec(
@@ -346,7 +356,10 @@ class Engine:
         port = settings.UDP_MULTICAST_PORT_START + stream.id
         return (
             f"{settings.UDP_MULTICAST_BASE}:{port}"
-            f"?pkt_size={settings.UDP_BUFFER_SIZE}&ttl={settings.UDP_TTL}"
+            f"?pkt_size=1316"
+            f"&buffer_size=4194304"
+            f"&ttl={settings.UDP_TTL}"
+            f"&overrun_nonfatal=1"
         )
 
     def _register(self, s: Stream) -> StreamProcess:
