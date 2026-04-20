@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IPTV Manager</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--accent:#6366f1;--accent-hover:#818cf8;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--text:#e2e8f0;--muted:#94a3b8;--danger:#dc2626}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.container{max-width:1100px;margin:0 auto;padding:20px}
+
+/* Auth page */
+#auth-page{display:flex;align-items:center;justify-content:center;min-height:100vh}
+.auth-box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:40px;width:380px}
+.auth-box h1{text-align:center;margin-bottom:24px;font-size:1.5rem}
+.auth-box input{width:100%;padding:10px 14px;margin-bottom:12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.95rem}
+.auth-box button{width:100%;padding:10px;border-radius:8px;border:none;background:var(--accent);color:#fff;font-size:1rem;cursor:pointer;margin-bottom:8px;font-weight:600}
+.auth-box button:hover{background:var(--accent-hover)}
+.auth-box .toggle{text-align:center;color:var(--muted);font-size:.85rem;cursor:pointer}
+.auth-box .toggle:hover{color:var(--text)}
+.auth-box .error{color:var(--red);font-size:.85rem;margin-bottom:8px;display:none}
+
+/* Dashboard */
+#app-page{display:none}
+header{display:flex;justify-content:space-between;align-items:center;padding:16px 0;border-bottom:1px solid var(--border);margin-bottom:24px}
+header h1{font-size:1.3rem;display:flex;align-items:center;gap:8px}
+header h1::before{content:"📡"}
+.btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:.85rem;font-weight:600;transition:.15s}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:var(--accent-hover)}
+.btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{opacity:.85}
+.btn-sm{padding:5px 10px;font-size:.8rem}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--muted)}.btn-outline:hover{border-color:var(--text);color:var(--text)}
+
+/* Stream cards */
+.streams-grid{display:grid;gap:16px}
+.stream-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;display:flex;justify-content:space-between;align-items:center;transition:.15s}
+.stream-card:hover{border-color:var(--accent)}
+.stream-info h3{font-size:1rem;margin-bottom:4px}
+.stream-meta{font-size:.8rem;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:.75rem;font-weight:600;text-transform:uppercase}
+.badge-live{background:rgba(34,197,94,.15);color:var(--green)}
+.badge-dvr{background:rgba(234,179,8,.15);color:var(--yellow)}
+.badge-down{background:rgba(239,68,68,.15);color:var(--red)}
+.badge-stopped{background:rgba(148,163,184,.1);color:var(--muted)}
+.stream-actions{display:flex;gap:6px;align-items:center}
+
+/* Modal */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:100}
+.modal-overlay.active{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px;width:440px}
+.modal h2{margin-bottom:16px;font-size:1.1rem}
+.modal label{display:block;font-size:.85rem;color:var(--muted);margin-bottom:4px;margin-top:12px}
+.modal input,.modal select{width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.9rem}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+
+/* Logs */
+.logs-panel{margin-top:24px}
+.logs-panel h2{font-size:1rem;margin-bottom:12px}
+.log-entry{font-size:.8rem;padding:6px 12px;border-left:3px solid var(--border);margin-bottom:4px;background:rgba(255,255,255,.02);border-radius:0 6px 6px 0}
+.log-entry.live{border-color:var(--green)}.log-entry.dvr{border-color:var(--yellow)}.log-entry.down{border-color:var(--red)}
+.log-time{color:var(--muted);margin-right:8px}
+
+/* Responsive */
+@media(max-width:600px){.container{padding:12px}.stream-card{flex-direction:column;align-items:flex-start;gap:12px}.stream-actions{width:100%;justify-content:flex-end}}
+</style>
+</head>
+<body>
+
+<!-- AUTH -->
+<div id="auth-page">
+  <div class="auth-box">
+    <h1>🔐 IPTV Manager</h1>
+    <div class="error" id="auth-error"></div>
+    <input id="auth-user" placeholder="Username" autocomplete="username">
+    <input id="auth-pass" type="password" placeholder="Password" autocomplete="current-password">
+    <button id="auth-btn" onclick="doAuth()">Login</button>
+    <div class="toggle" id="auth-toggle" onclick="toggleAuth()">Don't have an account? Register</div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app-page">
+  <div class="container">
+    <header>
+      <h1>IPTV Manager</h1>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="user-label" style="color:var(--muted);font-size:.85rem"></span>
+        <button class="btn btn-primary" onclick="openAddModal()">+ Add Stream</button>
+        <button class="btn btn-outline" onclick="logout()">Logout</button>
+      </div>
+    </header>
+    <div class="streams-grid" id="streams-grid"></div>
+    <div class="logs-panel" id="logs-panel" style="display:none">
+      <h2>📋 Stream Logs <button class="btn btn-sm btn-outline" onclick="closeLogs()">Close</button></h2>
+      <div id="logs-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ADD/EDIT MODAL -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h2 id="modal-title">Add Stream</h2>
+    <label>Name</label><input id="m-name" placeholder="CNN HD">
+    <label>Source URL</label><input id="m-source" placeholder="http://source/stream.m3u8">
+    <label>RTMP Key (unique)</label><input id="m-key" placeholder="cnn_hd">
+    <label>DVR Retention (hours)</label><input id="m-dvr" type="number" value="24">
+    <label style="margin-top:12px"><input type="checkbox" id="m-enabled" checked> Enabled</label>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="modal-save" onclick="saveStream()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('token');
+let isLogin = true;
+let editingId = null;
+let ws = null;
+
+// ── Auth ──
+function toggleAuth(){
+  isLogin = !isLogin;
+  document.getElementById('auth-btn').textContent = isLogin ? 'Login' : 'Register';
+  document.getElementById('auth-toggle').textContent = isLogin ? "Don't have an account? Register" : "Already have an account? Login";
+}
+async function doAuth(){
+  const user = document.getElementById('auth-user').value;
+  const pass = document.getElementById('auth-pass').value;
+  const errEl = document.getElementById('auth-error');
+  errEl.style.display = 'none';
+  try {
+    let res;
+    if(isLogin){
+      const body = new URLSearchParams();
+      body.append('username', user);
+      body.append('password', pass);
+      res = await fetch(API+'/api/auth/login', {method:'POST', body});
+    } else {
+      res = await fetch(API+'/api/auth/register', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:user, password:pass})});
+    }
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.detail || 'Error');
+    token = data.access_token;
+    localStorage.setItem('token', token);
+    showApp();
+  } catch(e){
+    errEl.textContent = e.message;
+    errEl.style.display = 'block';
+  }
+}
+function logout(){
+  token = null;
+  localStorage.removeItem('token');
+  if(ws) ws.close();
+  document.getElementById('auth-page').style.display = 'flex';
+  document.getElementById('app-page').style.display = 'none';
+}
+
+// ── API helpers ──
+async function api(path, opts={}){
+  opts.headers = {...(opts.headers||{}), Authorization:'Bearer '+token};
+  const r = await fetch(API+path, opts);
+  if(r.status === 401){ logout(); throw new Error('Session expired'); }
+  return r;
+}
+async function apiJson(path, opts={}){
+  const r = await api(path, opts);
+  return r.json();
+}
+
+// ── App ──
+async function showApp(){
+  try {
+    const me = await apiJson('/api/auth/me');
+    document.getElementById('user-label').textContent = '👤 '+me.username;
+  } catch { return; }
+  document.getElementById('auth-page').style.display = 'none';
+  document.getElementById('app-page').style.display = 'block';
+  loadStreams();
+  connectWS();
+}
+
+async function loadStreams(){
+  const streams = await apiJson('/api/streams/');
+  renderStreams(streams);
+}
+
+function renderStreams(streams){
+  const grid = document.getElementById('streams-grid');
+  grid.innerHTML = streams.map(s => `
+    <div class="stream-card" id="card-${s.id}">
+      <div class="stream-info">
+        <h3>${esc(s.name)} <span class="badge badge-${s.status}">${statusIcon(s.status)} ${s.status}</span></h3>
+        <div class="stream-meta">
+          <span>🔗 ${esc(s.source_url.substring(0,60))}${s.source_url.length>60?'...':''}</span>
+          <span>📺 ${esc(s.rtmp_key)}</span>
+          <span>💾 DVR ${s.dvr_hours}h</span>
+          <span>⚠️ Failures: ${s.consecutive_failures}</span>
+        </div>
+      </div>
+      <div class="stream-actions">
+        <button class="btn btn-sm btn-outline" onclick="viewLogs(${s.id})">Logs</button>
+        <button class="btn btn-sm btn-outline" onclick="openEditModal(${s.id})">Edit</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteStream(${s.id})">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function statusIcon(s){
+  return {live:'🟢',dvr:'🟡',down:'🔴',stopped:'⚪'}[s]||'⚪';
+}
+function esc(s){return s?s.replace(/</g,'&lt;').replace(/>/g,'&gt;'):'';}
+
+// ── WebSocket ──
+function connectWS(){
+  if(ws) ws.close();
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/status`);
+  ws.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    // Update badge in-place
+    const card = document.getElementById('card-'+d.stream_id);
+    if(card){
+      const badge = card.querySelector('.badge');
+      if(badge){
+        badge.className = 'badge badge-'+d.status;
+        badge.innerHTML = statusIcon(d.status)+' '+d.status;
+      }
+    }
+  };
+  ws.onclose = () => setTimeout(connectWS, 3000);
+}
+
+// ── Modals ──
+function openAddModal(){
+  editingId = null;
+  document.getElementById('modal-title').textContent = 'Add Stream';
+  document.getElementById('m-name').value = '';
+  document.getElementById('m-source').value = '';
+  document.getElementById('m-key').value = '';
+  document.getElementById('m-dvr').value = '24';
+  document.getElementById('m-enabled').checked = true;
+  document.getElementById('modal').classList.add('active');
+}
+async function openEditModal(id){
+  editingId = id;
+  const streams = await apiJson('/api/streams/');
+  const s = streams.find(x=>x.id===id);
+  if(!s) return;
+  document.getElementById('modal-title').textContent = 'Edit Stream';
+  document.getElementById('m-name').value = s.name;
+  document.getElementById('m-source').value = s.source_url;
+  document.getElementById('m-key').value = s.rtmp_key;
+  document.getElementById('m-dvr').value = s.dvr_hours;
+  document.getElementById('m-enabled').checked = s.enabled;
+  document.getElementById('modal').classList.add('active');
+}
+function closeModal(){ document.getElementById('modal').classList.remove('active'); }
+
+async function saveStream(){
+  const body = {
+    name: document.getElementById('m-name').value,
+    source_url: document.getElementById('m-source').value,
+    rtmp_key: document.getElementById('m-key').value,
+    dvr_hours: parseInt(document.getElementById('m-dvr').value)||24,
+    enabled: document.getElementById('m-enabled').checked,
+    dvr_enabled: true,
+  };
+  if(editingId){
+    await api('/api/streams/'+editingId, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  } else {
+    await api('/api/streams/', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  }
+  closeModal();
+  loadStreams();
+}
+
+async function deleteStream(id){
+  if(!confirm('Delete this stream?')) return;
+  await api('/api/streams/'+id, {method:'DELETE'});
+  loadStreams();
+}
+
+// ── Logs ──
+async function viewLogs(id){
+  const logs = await apiJson('/api/streams/'+id+'/logs');
+  const panel = document.getElementById('logs-panel');
+  const list = document.getElementById('logs-list');
+  list.innerHTML = logs.length ? logs.map(l=>`
+    <div class="log-entry ${l.event}">
+      <span class="log-time">${new Date(l.created_at).toLocaleString()}</span>
+      <strong>[${l.event}]</strong> ${esc(l.message)}
+    </div>
+  `).join('') : '<div style="color:var(--muted)">No logs yet.</div>';
+  panel.style.display = 'block';
+}
+function closeLogs(){ document.getElementById('logs-panel').style.display = 'none'; }
+
+// ── Init ──
+if(token) showApp();
+</script>
+</body>
+</html>
