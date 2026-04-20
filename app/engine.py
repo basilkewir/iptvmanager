@@ -39,7 +39,16 @@ class StreamProcess:
 
     @property
     def rtmp_target(self) -> str:
-        return f"{settings.FLUSSONIC_RTMP_BASE}/{self.rtmp_key}"
+        base = settings.FLUSSONIC_RTMP_BASE.rstrip("/")
+        fmt = settings.FLUSSONIC_PUBLISH_FORMAT
+        if fmt == "mpegts":
+            return f"{base}/{self.rtmp_key}/publish"
+        else:
+            return f"{base}/{self.rtmp_key}"
+
+    @property
+    def output_format(self) -> str:
+        return settings.FLUSSONIC_PUBLISH_FORMAT
 
     @property
     def dvr_dir(self) -> str:
@@ -113,10 +122,10 @@ class StreamProcess:
                 "-reconnect_delay_max", "5",
                 "-i", self.source_url,
                 "-c", "copy",
-                "-f", "flv",
+                "-f", self.output_format,
                 self.rtmp_target,
             ]
-            # For RTSP sources, use different flags
+            # For RTSP sources, use different input flags
             if self.source_url.lower().startswith("rtsp://"):
                 cmd = [
                     settings.FFMPEG_PATH,
@@ -124,7 +133,7 @@ class StreamProcess:
                     "-rtsp_transport", "tcp",
                     "-i", self.source_url,
                     "-c", "copy",
-                    "-f", "flv",
+                    "-f", self.output_format,
                     self.rtmp_target,
                 ]
             logger.info(f"[{self.name}] FFmpeg cmd: {' '.join(cmd)}")
@@ -206,7 +215,7 @@ class StreamProcess:
                 "-f", "concat", "-safe", "0",
                 "-i", concat_path,
                 "-c", "copy",
-                "-f", "flv",
+                "-f", self.output_format,
                 self.rtmp_target,
             ]
             self.process = await asyncio.create_subprocess_exec(

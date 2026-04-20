@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     HEALTH_CHECK_FAILURES_BEFORE_DOWN: int = 3
     DVR_SEGMENT_DURATION: int = 10  # seconds per .ts segment
     DVR_RETENTION_HOURS: int = 24
-    FLUSSONIC_RTMP_BASE: str = "rtmp://localhost/live"
+    FLUSSONIC_RTMP_BASE: str = "http://localhost:80"
+    FLUSSONIC_PUBLISH_FORMAT: str = "mpegts"  # "flv" for RTMP, "mpegts" for HTTP MPEG-TS
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"
     LOG_LEVEL: str = "DEBUG"
