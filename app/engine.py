@@ -105,6 +105,27 @@ class StreamProcess:
         """Return FFmpeg overlay position expression using custom X/Y."""
         return f"{self.logo_x}:{self.logo_y}"
 
+    def _build_logo_filter(self) -> tuple[list[str], list[str]]:
+        """
+        Returns (extra_input_args, filter_and_codec_args) for logo overlay.
+        Scales logo to 150px wide (keeps aspect ratio), handles alpha,
+        and loops the image so it never runs out of frames.
+        """
+        extra_in = ["-loop", "1", "-i", self.logo_path]
+        filt = (
+            f"[1:v]format=rgba,scale=150:-1[logo];"
+            f"[0:v][logo]overlay={self._overlay_expr()}"
+        )
+        codec = [
+            "-filter_complex", filt,
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-b:v", "4000k", "-maxrate", "4500k", "-bufsize", "8000k",
+            "-g", "50", "-keyint_min", "25",
+            "-c:a", "aac", "-b:a", "128k",
+        ]
+        return extra_in, codec
+
     # ── LIVE: source → UDP multicast ─────────────────────────────────────
     async def start_live_output(self):
         """Push live source directly to UDP multicast."""
@@ -125,16 +146,8 @@ class StreamProcess:
                 "-i", self.source_url,
             ]
             if self._has_logo():
-                cmd += [
-                    "-i", self.logo_path,
-                    "-filter_complex",
-                    f"[0:v][1:v]overlay={self._overlay_expr()}:shortest=1",
-                    "-c:v", "libx264", "-preset", "ultrafast",
-                    "-tune", "zerolatency",
-                    "-b:v", "4000k", "-maxrate", "4500k", "-bufsize", "8000k",
-                    "-g", "50", "-keyint_min", "25",
-                    "-c:a", "aac", "-b:a", "128k",
-                ]
+                extra_in, codec_args = self._build_logo_filter()
+                cmd += extra_in + codec_args
             else:
                 cmd += ["-c", "copy"]
             cmd += [
@@ -215,16 +228,8 @@ class StreamProcess:
                 "-i", concat_path,
             ]
             if self._has_logo():
-                cmd += [
-                    "-i", self.logo_path,
-                    "-filter_complex",
-                    f"[0:v][1:v]overlay={self._overlay_expr()}:shortest=1",
-                    "-c:v", "libx264", "-preset", "ultrafast",
-                    "-tune", "zerolatency",
-                    "-b:v", "4000k", "-maxrate", "4500k", "-bufsize", "8000k",
-                    "-g", "50", "-keyint_min", "25",
-                    "-c:a", "aac", "-b:a", "128k",
-                ]
+                extra_in, codec_args = self._build_logo_filter()
+                cmd += extra_in + codec_args
             else:
                 cmd += ["-c", "copy"]
             cmd += [
