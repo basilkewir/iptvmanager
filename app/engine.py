@@ -49,7 +49,8 @@ class StreamProcess:
         self.consecutive_failures = 0
         self.last_online: Optional[datetime] = None
         self.dvr_started_at: Optional[datetime] = None   # when DVR playback began
-        self.lock = asyncio.Lock()
+        self.lock = asyncio.Lock()          # protects FFmpeg process start/kill
+        self.check_lock = asyncio.Lock()    # prevents concurrent _check_and_act on same stream
 
     @property
     def dvr_dir(self) -> str:
@@ -146,8 +147,8 @@ class StreamProcess:
             # -re paces input to real-time — only safe in copy mode.
             # When transcoding (logo overlay), libx264 paces itself and
             # -re causes frame-timing conflicts with the looped image input.
-            if not has_logo:
-                cmd += ["-re"]
+            # NOTE: removed for all modes — the 4MB UDP buffer absorbs bursts
+            # and -re causes timing drift that crashes long-running streams.
             cmd += [
                 "-fflags", "+genpts+discardcorrupt",
                 "-analyzeduration", "2000000",
@@ -440,89 +441,88 @@ class Engine:
             await asyncio.sleep(settings.HEALTH_CHECK_INTERVAL)
 
     async def _check_and_act(self, sp: StreamProcess):
-        # Don't touch manually stopped streams — user must press Start
-        if sp.manually_stopped:
+        # Prevent two concurrent health-check cycles on the same stream.
+        # This stops the race between the main loop and a manual start_stream()
+        # API call — without this both see mode!=LIVE and double-start FFmpeg.
+        if sp.check_lock.locked():
+            logger.debug(f"[{sp.name}] check already in progress — skipping")
             return
+        async with sp.check_lock:
+            if sp.manually_stopped:
+                return
 
-        alive = await sp.check_health()
-        logger.info(
-            f"[{sp.name}] Health: alive={alive}, mode={sp.mode.value}, "
-            f"failures={sp.consecutive_failures}, udp={sp.udp_target}"
-        )
-
-        if alive:
-            sp.consecutive_failures = 0
-            if sp.mode != StreamStatus.LIVE:
-                # Source is up → switch to live + start recording
-                await sp.start_live_output()
-                await sp.start_dvr_recording()
-                await self._log(sp.stream_id, "live",
-                                "Source online — streaming LIVE to UDP multicast")
-                await self._broadcast(sp)
-            else:
-                # Already LIVE — make sure output & recorder are still running
-                if sp.output_process and sp.output_process.returncode is not None:
-                    logger.warning(f"[{sp.name}] Live output process died — restarting")
-                    await sp.start_live_output()
-                if sp.recorder_process and sp.recorder_process.returncode is not None:
-                    logger.warning(f"[{sp.name}] DVR recorder process died — restarting")
-                    await sp.start_dvr_recording()
-        else:
-            sp.consecutive_failures += 1
-            threshold = settings.HEALTH_CHECK_FAILURES_BEFORE_DOWN
-            if sp.consecutive_failures >= threshold and sp.mode in (
-                StreamStatus.LIVE, StreamStatus.STOPPED
-            ):
-                # Source died or was never up → switch to DVR playback
-                logger.warning(
-                    f"[{sp.name}] Source DOWN ({sp.consecutive_failures} failures) "
-                    f"— switching to DVR playback"
-                )
-                await sp.start_dvr_playback()
-                await self._log(sp.stream_id, "dvr",
-                                "Source offline — playing DVR to UDP multicast")
-                await self._broadcast(sp)
-            elif sp.mode == StreamStatus.DVR:
-                # Already in DVR playback while source is still down.
-                # Restart DVR if: process died OR playlist is >30 min old
-                # (refresh picks up newest segments and avoids deleted-file crashes)
-                playlist_age_secs = (
-                    (datetime.now(timezone.utc) - sp.dvr_started_at).total_seconds()
-                    if sp.dvr_started_at else 99999
-                )
-                process_dead = (sp.output_process is None or
-                                sp.output_process.returncode is not None)
-                if process_dead or playlist_age_secs >= 1800:
-                    reason = "process died" if process_dead else "30-min playlist refresh"
-                    logger.warning(f"[{sp.name}] DVR playback restarting ({reason})")
-                    await sp.start_dvr_playback()
-                    if sp.mode == StreamStatus.DOWN:
-                        await self._log(sp.stream_id, "down",
-                                        "DVR playback failed — no segments available")
-                        await self._broadcast(sp)
-            elif sp.mode == StreamStatus.DOWN:
-                # No segments last time — retry DVR in case old segments exist
-                if sp._get_recent_segments():
-                    logger.info(f"[{sp.name}] DVR segments found — retrying playback")
-                    await sp.start_dvr_playback()
-                    if sp.mode == StreamStatus.DVR:
-                        await self._log(sp.stream_id, "dvr",
-                                        "DVR segments available — playing to UDP multicast")
-                        await self._broadcast(sp)
-
-        # Persist to DB
-        async with async_session() as db:
-            await db.execute(
-                update(Stream)
-                .where(Stream.id == sp.stream_id)
-                .values(
-                    status=sp.mode,
-                    consecutive_failures=sp.consecutive_failures,
-                    last_checked=datetime.now(timezone.utc),
-                    last_online=sp.last_online,
-                )
+            alive = await sp.check_health()
+            logger.info(
+                f"[{sp.name}] Health: alive={alive}, mode={sp.mode.value}, "
+                f"failures={sp.consecutive_failures}, udp={sp.udp_target}"
             )
-            await db.commit()
+
+            if alive:
+                sp.consecutive_failures = 0
+                if sp.mode != StreamStatus.LIVE:
+                    await sp.start_live_output()
+                    await sp.start_dvr_recording()
+                    await self._log(sp.stream_id, "live",
+                                    "Source online — streaming LIVE to UDP multicast")
+                    await self._broadcast(sp)
+                else:
+                    if sp.output_process and sp.output_process.returncode is not None:
+                        logger.warning(f"[{sp.name}] Live output process died — restarting")
+                        await sp.start_live_output()
+                    if sp.recorder_process and sp.recorder_process.returncode is not None:
+                        logger.warning(f"[{sp.name}] DVR recorder process died — restarting")
+                        await sp.start_dvr_recording()
+            else:
+                sp.consecutive_failures += 1
+                threshold = settings.HEALTH_CHECK_FAILURES_BEFORE_DOWN
+                if sp.consecutive_failures >= threshold and sp.mode in (
+                    StreamStatus.LIVE, StreamStatus.STOPPED
+                ):
+                    logger.warning(
+                        f"[{sp.name}] Source DOWN ({sp.consecutive_failures} failures) "
+                        f"— switching to DVR playback"
+                    )
+                    await sp.start_dvr_playback()
+                    await self._log(sp.stream_id, "dvr",
+                                    "Source offline — playing DVR to UDP multicast")
+                    await self._broadcast(sp)
+                elif sp.mode == StreamStatus.DVR:
+                    playlist_age_secs = (
+                        (datetime.now(timezone.utc) - sp.dvr_started_at).total_seconds()
+                        if sp.dvr_started_at else 99999
+                    )
+                    process_dead = (sp.output_process is None or
+                                    sp.output_process.returncode is not None)
+                    if process_dead or playlist_age_secs >= 1800:
+                        reason = "process died" if process_dead else "30-min playlist refresh"
+                        logger.warning(f"[{sp.name}] DVR playback restarting ({reason})")
+                        await sp.start_dvr_playback()
+                        if sp.mode == StreamStatus.DOWN:
+                            await self._log(sp.stream_id, "down",
+                                            "DVR playback failed — no segments available")
+                            await self._broadcast(sp)
+                elif sp.mode == StreamStatus.DOWN:
+                    if sp._get_recent_segments():
+                        logger.info(f"[{sp.name}] DVR segments found — retrying playback")
+                        await sp.start_dvr_playback()
+                        if sp.mode == StreamStatus.DVR:
+                            await self._log(sp.stream_id, "dvr",
+                                            "DVR segments available — playing to UDP multicast")
+                            await self._broadcast(sp)
+
+            # Persist status to DB
+            async with async_session() as db:
+                await db.execute(
+                    update(Stream)
+                    .where(Stream.id == sp.stream_id)
+                    .values(
+                        status=sp.mode,
+                        consecutive_failures=sp.consecutive_failures,
+                        last_checked=datetime.now(timezone.utc),
+                        last_online=sp.last_online,
+                    )
+                )
+                await db.commit()
 
     # ── logging + websocket ───────────────────────────────────────────────
     async def _log(self, stream_id: int, event: str, message: str):
