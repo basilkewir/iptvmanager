@@ -139,7 +139,10 @@ class StreamProcess:
             else:
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5"]
+            # -re is an INPUT option — paces reading to real-time rate,
+            # preventing burst delivery from HTTP/HLS sources flooding UDP
             cmd += [
+                "-re",
                 "-fflags", "+genpts+discardcorrupt",
                 "-analyzeduration", "2000000",
                 "-probesize", "2000000",
@@ -151,24 +154,11 @@ class StreamProcess:
             else:
                 cmd += ["-c", "copy"]
             cmd += [
-                # -re paces output to real-time rate — prevents UDP bursts
-                # from chunked HTTP/HLS sources which cause VLC/receiver stutter
-                "-re",
                 "-f", "mpegts",
                 "-mpegts_flags", "+resend_headers",
                 "-pcr_period", "20",
                 self.udp_target,
             ]
-            logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
-            self.output_process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            asyncio.create_task(self._log_ffmpeg(self.output_process, "live-out"))
-            self.mode = StreamStatus.LIVE
-            self.consecutive_failures = 0
-            self.last_online = datetime.now(timezone.utc)
             logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
