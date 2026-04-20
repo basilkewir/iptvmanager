@@ -45,6 +45,7 @@ class StreamProcess:
         self.output_process: Optional[asyncio.subprocess.Process] = None
         self.recorder_process: Optional[asyncio.subprocess.Process] = None
         self.mode: StreamStatus = StreamStatus.STOPPED
+        self.manually_stopped: bool = False      # set True by manual stop; suppresses auto-restart
         self.consecutive_failures = 0
         self.last_online: Optional[datetime] = None
         self.dvr_started_at: Optional[datetime] = None   # when DVR playback began
@@ -274,6 +275,7 @@ class StreamProcess:
             await self._kill_output()
             await self._kill_recorder()
             self.mode = StreamStatus.STOPPED
+            self.manually_stopped = True
 
     # ── internal helpers ─────────────────────────────────────────────────
     async def _kill_output(self):
@@ -307,7 +309,13 @@ class StreamProcess:
                 if not line:
                     break
                 msg = line.decode(errors="ignore").strip()
-                if msg:
+                if not msg:
+                    continue
+                # Surface errors and warnings prominently; suppress verbose info
+                low = msg.lower()
+                if any(k in low for k in ("error", "invalid", "failed", "no such", "unable")):
+                    logger.warning(f"[{self.name}] ffmpeg({label}): {msg}")
+                else:
                     logger.debug(f"[{self.name}] ffmpeg({label}): {msg}")
         except Exception:
             pass
@@ -403,7 +411,7 @@ class Engine:
         """Stop a stream's FFmpeg processes without removing it from the engine."""
         sp = self.streams.get(stream_id)
         if sp:
-            await sp.stop()
+            await sp.stop()   # sets manually_stopped = True
             await self._log(stream_id, "stopped", "Stream manually stopped")
             await self._broadcast(sp)
 
@@ -411,6 +419,8 @@ class Engine:
         """Force-start a stopped/down stream immediately (skip health check delay)."""
         sp = self.streams.get(stream_id)
         if sp:
+            sp.manually_stopped = False   # allow auto-restart again
+            sp.consecutive_failures = 0
             await self._check_and_act(sp)
             await self._broadcast(sp)
 
@@ -430,6 +440,10 @@ class Engine:
             await asyncio.sleep(settings.HEALTH_CHECK_INTERVAL)
 
     async def _check_and_act(self, sp: StreamProcess):
+        # Don't touch manually stopped streams — user must press Start
+        if sp.manually_stopped:
+            return
+
         alive = await sp.check_health()
         logger.info(
             f"[{sp.name}] Health: alive={alive}, mode={sp.mode.value}, "
