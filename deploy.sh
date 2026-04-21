@@ -12,6 +12,39 @@ cd "$APP_DIR"
 
 echo ""
 echo "════════════════════════════════════════"
+echo "  📺 IPTV Manager — Update"
+echo "════════════════════════════════════════"
+
+# ── 0. Pre-flight checks ─────────────────────────────────────────────────
+echo ""
+echo "🔍 [0/4] Pre-flight checks..."
+DISK_PCT=$(df "$APP_DIR" | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+if [ "$DISK_PCT" -ge 90 ]; then
+    echo "   ❌ Disk is ${DISK_PCT}% full — aborting deploy to protect DVR data."
+    echo "      Free up space first: du -sh $APP_DIR/data/dvr/*"
+    exit 1
+fi
+echo "   ✅ Disk OK (${DISK_PCT}% used)"
+
+# Backup DB before any migration
+if [ -f "$DB_PATH" ]; then
+    BACKUP="${DB_PATH}.bak"
+    cp "$DB_PATH" "$BACKUP"
+    echo "   ✅ DB backed up → $BACKUP"
+fi
+IPTV Manager Update Script ──
+# Run on server: bash /opt/iptvmanager/deploy.sh
+# Pulls latest code, updates deps, migrates DB columns, restarts service.
+# Your data (DB, DVR segments, logos) is NEVER touched.
+
+set -e
+APP_DIR="/opt/iptvmanager"
+DB_PATH="$APP_DIR/data/iptvmanager.db"
+
+cd "$APP_DIR"
+
+echo ""
+echo "════════════════════════════════════════"
 echo "  �  IPTV Manager — Update"
 echo "════════════════════════════════════════"
 

@@ -11,7 +11,8 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--
 .container{max-width:1200px;margin:0 auto;padding:20px}
 a{color:var(--accent);text-decoration:none}
 
-/* Auth */
+/* Auth         <div class="stream-header">
+        <h3>${esc(s.name)} <span class="badge badge-${s.status}">${statusIcon(s.status)} ${s.status}</span>${s.recorder_running ? ' <span class="badge" style="background:#c0392b;color:#fff;font-size:0.7em">● REC</span>' : ''}</h3>
 #auth-page{display:flex;align-items:center;justify-content:center;min-height:100vh}
 .auth-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;width:400px;box-shadow:0 8px 32px rgba(0,0,0,.3)}
 .auth-box h1{text-align:center;margin-bottom:8px;font-size:1.6rem}
@@ -487,6 +488,9 @@ function connectWS(){
     const s = allStreams.find(x=>x.stream_id===d.stream_id || x.id===d.stream_id);
     if(s){
       s.status = d.status;
+      if(d.dvr_segments !== undefined) s.dvr_segments = d.dvr_segments;
+      if(d.dvr_size_mb !== undefined) s.dvr_size_mb = d.dvr_size_mb;
+      if(d.recorder_running !== undefined) s.recorder_running = d.recorder_running;
       renderStreams();
       updateStats();
     }

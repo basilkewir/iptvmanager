@@ -182,13 +182,31 @@ class StreamProcess:
         """Record live source to local .ts segment files."""
         async with self.lock:
             await self._kill_recorder()
+
+            # Guard against filling the disk
+            import shutil as _shutil
+            try:
+                usage = _shutil.disk_usage(settings.DVR_STORAGE_PATH)
+                pct = usage.used / usage.total * 100
+                if pct > 90:
+                    logger.error(
+                        f"[{self.name}] Disk {pct:.0f}% full — DVR recording NOT started"
+                    )
+                    return
+            except Exception:
+                pass
+
             logger.info(f"[{self.name}] Starting DVR recording → {self.dvr_dir}")
-            seg_path = os.path.join(self.dvr_dir, "seg_%05d.ts")
+            # Use strftime-based names so segments are never overwritten on restart
+            seg_path = os.path.join(self.dvr_dir, "seg_%Y%m%d_%H%M%S.ts")
             cmd = [settings.FFMPEG_PATH]
             if self.source_url.lower().startswith("rtsp://"):
-                cmd += ["-rtsp_transport", "tcp"]
+                cmd += [
+                    "-rtsp_transport", "tcp",
+                    "-rtsp_flags", "prefer_tcp",
+                    "-timeout", "10000000",   # 10s reconnect timeout
+                ]
             else:
-                # Auto-reconnect for HTTP/HLS sources — recorder survives brief glitches
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5"]
             cmd += [
@@ -196,12 +214,13 @@ class StreamProcess:
                 "-i", self.source_url,
                 "-c", "copy",
                 "-f", "segment",
+                "-strftime", "1",
                 "-segment_time", str(settings.DVR_SEGMENT_DURATION),
                 "-segment_format", "mpegts",
                 "-reset_timestamps", "1",
-                "-break_non_keyframes", "0",
                 seg_path,
             ]
+            logger.info(f"[{self.name}] REC CMD: {' '.join(cmd)}")
             self.recorder_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -320,6 +339,10 @@ class StreamProcess:
                     logger.debug(f"[{self.name}] ffmpeg({label}): {msg}")
         except Exception:
             pass
+        finally:
+            rc = proc.returncode
+            if rc is not None and rc != 0:
+                logger.warning(f"[{self.name}] ffmpeg({label}) exited with code {rc}")
 
     def _get_recent_segments(self) -> list[str]:
         cutoff = time.time() - (self.dvr_hours * 3600)
@@ -432,13 +455,18 @@ class Engine:
 
     # ── main loop ─────────────────────────────────────────────────────────
     async def _loop(self):
+        # Run an immediate first check so streams start without waiting for the
+        # first sleep interval — critical for fast service restarts.
+        tasks = [self._check_and_act(sp) for sp in list(self.streams.values())]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         while self._running:
+            await asyncio.sleep(settings.HEALTH_CHECK_INTERVAL)
             tasks = [self._check_and_act(sp) for sp in list(self.streams.values())]
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
             for sp in self.streams.values():
                 sp.cleanup_old_segments()
-            await asyncio.sleep(settings.HEALTH_CHECK_INTERVAL)
 
     async def _check_and_act(self, sp: StreamProcess):
         # Prevent two concurrent health-check cycles on the same stream.
@@ -532,11 +560,15 @@ class Engine:
             await db.commit()
 
     async def _broadcast(self, sp: StreamProcess):
+        segs = sp._get_recent_segments()
+        size_mb = round(sum(os.path.getsize(f) for f in segs if os.path.exists(f)) / (1024 * 1024), 2)
         data = {
             "stream_id": sp.stream_id,
             "name": sp.name,
             "status": sp.mode.value,
             "udp_target": sp.udp_target,
+            "dvr_segments": len(segs),
+            "dvr_size_mb": size_mb,
         }
         dead = []
         for ws in self._ws_clients:
@@ -558,18 +590,27 @@ class Engine:
 
     # ── status for API ────────────────────────────────────────────────────
     def get_all_status(self) -> list[dict]:
-        return [
-            {
+        out = []
+        for sp in self.streams.values():
+            segs = sp._get_recent_segments()
+            size_mb = round(
+                sum(os.path.getsize(f) for f in segs if os.path.exists(f)) / (1024 * 1024), 2
+            )
+            out.append({
                 "stream_id": sp.stream_id,
                 "name": sp.name,
                 "status": sp.mode.value,
                 "udp_target": sp.udp_target,
                 "consecutive_failures": sp.consecutive_failures,
                 "last_online": sp.last_online.isoformat() if sp.last_online else None,
-                "dvr_segments": len(sp._get_recent_segments()),
-            }
-            for sp in self.streams.values()
-        ]
+                "dvr_segments": len(segs),
+                "dvr_size_mb": size_mb,
+                "recorder_running": (
+                    sp.recorder_process is not None
+                    and sp.recorder_process.returncode is None
+                ),
+            })
+        return out
 
     def get_stream_dvr_detail(self, stream_id: int) -> dict | None:
         sp = self.streams.get(stream_id)

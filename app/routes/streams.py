@@ -22,18 +22,8 @@ def _udp_for(s: Stream) -> str:
     port = settings.UDP_MULTICAST_PORT_START + s.id
     return f"{settings.UDP_MULTICAST_BASE}:{port}"
 
-def _stream_out(s: Stream) -> StreamOut:
-    # Pull live DVR stats from the engine if stream is loaded
-    sp = engine.streams.get(s.id)
-    dvr_segs = 0
-    dvr_size_mb = 0.0
-    if sp:
-        segs = sp._get_recent_segments()
-        dvr_segs = len(segs)
-        try:
-            dvr_size_mb = round(sum(os.path.getsize(f) for f in segs) / 1048576, 2)
-        except Exception:
-            pass
+def _stream_out(s: Stream, dvr_segs: int = 0, dvr_size_mb: float = 0.0,
+                recorder_running: bool = False) -> StreamOut:
     return StreamOut(
         id=s.id, name=s.name, source_url=s.source_url, rtmp_key=s.rtmp_key,
         enabled=s.enabled, status=s.status.value if s.status else "stopped",
@@ -46,12 +36,38 @@ def _stream_out(s: Stream) -> StreamOut:
         logo_y=s.logo_y if s.logo_y is not None else 10,
         dvr_segments=dvr_segs,
         dvr_size_mb=dvr_size_mb,
+        recorder_running=recorder_running,
     )
 
 @router.get("/", response_model=List[StreamOut])
 async def list_streams(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     result = await db.execute(select(Stream))
-    return [_stream_out(s) for s in result.scalars().all()]
+    # Compute DVR stats once from engine (one pass over in-memory state)
+    engine_status = {e["stream_id"]: e for e in engine.get_all_status()}
+    out = []
+    for s in result.scalars().all():
+        es = engine_status.get(s.id, {})
+        out.append(_stream_out(
+            s,
+            dvr_segs=es.get("dvr_segments", 0),
+            dvr_size_mb=es.get("dvr_size_mb", 0.0),
+            recorder_running=es.get("recorder_running", False),
+        ))
+    return out
+
+def _stream_out_single(s: Stream) -> StreamOut:
+    """Build StreamOut for one stream, pulling live stats from engine."""
+    sp = engine.streams.get(s.id)
+    dvr_segs, dvr_size_mb, recorder_running = 0, 0.0, False
+    if sp:
+        segs = sp._get_recent_segments()
+        dvr_segs = len(segs)
+        try:
+            dvr_size_mb = round(sum(os.path.getsize(f) for f in segs if os.path.exists(f)) / 1048576, 2)
+        except Exception:
+            pass
+        recorder_running = sp.recorder_process is not None and sp.recorder_process.returncode is None
+    return _stream_out(s, dvr_segs, dvr_size_mb, recorder_running)
 
 @router.post("/", response_model=StreamOut)
 async def create_stream(body: StreamCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
@@ -61,7 +77,7 @@ async def create_stream(body: StreamCreate, db: AsyncSession = Depends(get_db), 
     await db.refresh(s)
     if s.enabled:
         await engine.add_stream(s)
-    return _stream_out(s)
+    return _stream_out_single(s)
 
 @router.put("/{stream_id}", response_model=StreamOut)
 async def update_stream(stream_id: int, body: StreamUpdate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
@@ -74,7 +90,7 @@ async def update_stream(stream_id: int, body: StreamUpdate, db: AsyncSession = D
     await db.commit()
     await db.refresh(s)
     await engine.update_stream(s)
-    return _stream_out(s)
+    return _stream_out_single(s)
 
 @router.delete("/{stream_id}")
 async def delete_stream(stream_id: int, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
@@ -140,7 +156,7 @@ async def upload_logo(stream_id: int,
     await db.commit()
     await db.refresh(s)
     await engine.update_stream(s)
-    return _stream_out(s)
+    return _stream_out_single(s)
 
 @router.delete("/{stream_id}/logo", response_model=StreamOut)
 async def delete_logo(stream_id: int, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
@@ -157,7 +173,7 @@ async def delete_logo(stream_id: int, db: AsyncSession = Depends(get_db), _: Use
     await db.commit()
     await db.refresh(s)
     await engine.update_stream(s)
-    return _stream_out(s)
+    return _stream_out_single(s)
 
 @router.get("/status")
 async def all_status(_: User = Depends(get_current_user)):

@@ -46,6 +46,7 @@ class StreamOut(BaseModel):
     logo_y: int = 10
     dvr_segments: int = 0
     dvr_size_mb: float = 0.0
+    recorder_running: bool = False
 
     class Config:
         from_attributes = True
