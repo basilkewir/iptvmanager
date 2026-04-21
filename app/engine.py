@@ -347,12 +347,16 @@ class StreamProcess:
                 cmd += extra_in + codec_args
             else:
                 cmd += ["-c", "copy"]
+            
             cmd += [
                 "-f", "mpegts",
                 "-mpegts_flags", "+resend_headers",
                 "-pcr_period", "20",
-                self.udp_target,
+                self.udp_target
             ]
+
+            logger.info(f"[{self.name}] DVR CMD: {' '.join(cmd)}")
+
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -513,7 +517,7 @@ class Engine:
     # ── stream management ─────────────────────────────────────────────────
     def _make_udp_target(self, stream: Stream) -> str:
         """Build the FFmpeg UDP output URL.
-
+        
         Supports both multicast (239.x.x.x) and unicast targets.
         When UDP_MULTICAST_INTERFACE is set, binds to that local IP so
         FFmpeg sends packets out the correct NIC (same as Flussonic localaddr).
@@ -530,11 +534,15 @@ class Engine:
             f"pkt_size=1316",
             f"buffer_size=4194304",
             f"overrun_nonfatal=1",
+            f"fifo_size=50000",
+            f"bitrate=2000000"
         ]
         if is_multicast:
             params.append(f"ttl={settings.UDP_TTL}")
+            
         if settings.UDP_MULTICAST_INTERFACE:
             params.append(f"localaddr={settings.UDP_MULTICAST_INTERFACE}")
+            
         return f"{base}:{port}?" + "&".join(params)
 
     def _register(self, s: Stream) -> StreamProcess:
