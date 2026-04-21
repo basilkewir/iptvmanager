@@ -40,6 +40,8 @@ class StreamProcess:
         self.dvr_hours = dvr_hours
         self.udp_target = udp_target
         self.logo_path = logo_path
+        # logo_x / logo_y are PERCENTAGES (0–100) of video width/height.
+        # They are resolved to pixels at stream-start time after probing.
         self.logo_x = logo_x
         self.logo_y = logo_y
         self.output_process: Optional[asyncio.subprocess.Process] = None
@@ -49,6 +51,9 @@ class StreamProcess:
         self.consecutive_failures = 0
         self.last_online: Optional[datetime] = None
         self.dvr_started_at: Optional[datetime] = None   # when DVR playback began
+        # Cached after the first successful ffprobe — reused for DVR playback
+        self._video_width: int = 1920
+        self._video_height: int = 1080
         self.lock = asyncio.Lock()          # protects FFmpeg process start/kill
         self.check_lock = asyncio.Lock()    # prevents concurrent _check_and_act on same stream
 
@@ -100,26 +105,87 @@ class StreamProcess:
             logger.warning(f"[{self.name}] health check error: {e}")
             return False
 
-    # ── logo overlay helper ────────────────────────────────────────────
+    # ── logo overlay helpers ───────────────────────────────────────────
     def _has_logo(self) -> bool:
         return bool(self.logo_path) and os.path.isfile(self.logo_path)
 
-    def _overlay_expr(self) -> str:
-        """Return FFmpeg overlay position expression using custom X/Y."""
-        return f"{self.logo_x}:{self.logo_y}"
+    async def _probe_video_size(self) -> tuple[int, int]:
+        """
+        Probe the source stream and return (width, height).
+        Result is cached on self._video_width / self._video_height so we
+        only hit the network once per stream lifecycle — DVR playback reuses
+        the last known resolution.
+        Falls back to 1920×1080 if probing fails.
+        """
+        try:
+            cmd = [settings.FFPROBE_PATH, "-v", "error"]
+            if self.source_url.lower().startswith("rtsp://"):
+                cmd += ["-rtsp_transport", "tcp"]
+            cmd += [
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0",
+                "-i", self.source_url,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                logger.warning(f"[{self.name}] video size probe timed out — using {self._video_width}×{self._video_height}")
+                return self._video_width, self._video_height
 
-    def _build_logo_filter(self) -> tuple[list[str], list[str]]:
+            parts = stdout.decode().strip().split(",")
+            if len(parts) == 2:
+                w, h = int(parts[0]), int(parts[1])
+                self._video_width, self._video_height = w, h
+                logger.info(f"[{self.name}] video size: {w}×{h}")
+                return w, h
+        except Exception as e:
+            logger.warning(f"[{self.name}] video size probe failed: {e} — using {self._video_width}×{self._video_height}")
+        return self._video_width, self._video_height
+
+    def _build_logo_filter(self, video_w: int, video_h: int) -> tuple[list[str], list[str]]:
         """
-        Returns (extra_input_args, filter_and_codec_args) for logo overlay.
-        Scales logo to 150px wide (keeps aspect ratio), handles alpha,
-        and loops the image so it never runs out of frames.
-        -framerate 25 on the logo input ensures the filter graph has a
-        consistent frame rate to sync against the live source.
+        Build FFmpeg logo overlay filter using PERCENTAGE-based X/Y positions.
+
+        logo_x / logo_y are 0–100 (percent of video width/height).
+        The logo is scaled to 10 % of the video width (min 40 px).
+        This guarantees the logo is always visible regardless of resolution —
+        SD (480p), HD (720p/1080p) or 4K all produce correct results.
+
+        Example: 1920×1080, logo_x=5, logo_y=5
+          → logo width = max(192, 40) = 192 px
+          → x_px = int(1920 * 5/100) = 96
+          → y_px = int(1080 * 5/100) = 54
         """
+        logo_w_px = max(int(video_w * 0.10), 40)
+        x_px = int(video_w * self.logo_x / 100)
+        y_px = int(video_h * self.logo_y / 100)
+
+        # Clamp so the logo can't overflow the frame
+        x_px = min(x_px, video_w - logo_w_px - 4)
+        y_px = min(y_px, video_h - 40)
+        x_px = max(x_px, 0)
+        y_px = max(y_px, 0)
+
+        logger.info(
+            f"[{self.name}] logo overlay: {video_w}×{video_h} "
+            f"pos=({self.logo_x}%,{self.logo_y}%) → px=({x_px},{y_px}) "
+            f"logo_w={logo_w_px}px"
+        )
+
         extra_in = ["-loop", "1", "-framerate", "25", "-i", self.logo_path]
         filt = (
-            f"[1:v]format=rgba,scale=150:-1[logo];"
-            f"[0:v][logo]overlay={self._overlay_expr()}"
+            f"[1:v]format=rgba,scale={logo_w_px}:-1[logo];"
+            f"[0:v][logo]overlay={x_px}:{y_px}"
         )
         codec = [
             "-filter_complex", filt,
@@ -137,18 +203,21 @@ class StreamProcess:
         async with self.lock:
             await self._kill_output()
             logger.info(f"[{self.name}] Starting LIVE → {self.udp_target}")
-            cmd = [settings.FFMPEG_PATH]
             has_logo = self._has_logo()
+
+            # Probe video dimensions before building the filter graph.
+            # This is essential for correct logo placement — without knowing
+            # the actual resolution, pixel coordinates are guesswork.
+            # The probe result is cached so DVR playback reuses it for free.
+            if has_logo:
+                vid_w, vid_h = await self._probe_video_size()
+
+            cmd = [settings.FFMPEG_PATH]
             if self.source_url.lower().startswith("rtsp://"):
                 cmd += ["-rtsp_transport", "tcp"]
             else:
                 cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5"]
-            # -re paces input to real-time — only safe in copy mode.
-            # When transcoding (logo overlay), libx264 paces itself and
-            # -re causes frame-timing conflicts with the looped image input.
-            # NOTE: removed for all modes — the 4MB UDP buffer absorbs bursts
-            # and -re causes timing drift that crashes long-running streams.
             cmd += [
                 "-fflags", "+genpts+discardcorrupt",
                 "-analyzeduration", "2000000",
@@ -156,7 +225,7 @@ class StreamProcess:
                 "-i", self.source_url,
             ]
             if has_logo:
-                extra_in, codec_args = self._build_logo_filter()
+                extra_in, codec_args = self._build_logo_filter(vid_w, vid_h)
                 cmd += extra_in + codec_args
             else:
                 cmd += ["-c", "copy"]
@@ -270,7 +339,11 @@ class StreamProcess:
                 "-i", concat_path,
             ]
             if self._has_logo():
-                extra_in, codec_args = self._build_logo_filter()
+                # Reuse cached resolution — live probe already ran; no extra
+                # network call needed during failover.
+                extra_in, codec_args = self._build_logo_filter(
+                    self._video_width, self._video_height
+                )
                 cmd += extra_in + codec_args
             else:
                 cmd += ["-c", "copy"]

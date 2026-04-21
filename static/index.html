@@ -284,9 +284,10 @@ BBC One|http://source.com/bbc1.m3u8|bbc1|2"></textarea>
     <label>DVR Retention (hours)</label>
     <input id="m-dvr" type="number" value="2" min="1" max="168">
     <div style="display:flex;gap:12px;margin-top:14px">
-      <div style="flex:1"><label>Logo X Position (px)</label><input id="m-logo-x" type="number" value="10" min="0"></div>
-      <div style="flex:1"><label>Logo Y Position (px)</label><input id="m-logo-y" type="number" value="10" min="0"></div>
+      <div style="flex:1"><label title="0–100% of video width from left edge">Logo X Position (%)</label><input id="m-logo-x" type="number" value="5" min="0" max="95" placeholder="5"></div>
+      <div style="flex:1"><label title="0–100% of video height from top edge">Logo Y Position (%)</label><input id="m-logo-y" type="number" value="5" min="0" max="95" placeholder="5"></div>
     </div>
+    <div style="font-size:.78rem;color:var(--muted);margin-top:2px">Percentage of video size — 5% = near top-left corner. Works on any resolution.</div>
     <div id="logo-upload-section" style="display:none;margin-top:14px;padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px">
       <label style="margin:0 0 8px 0">🖼️ Channel Logo</label>
       <div id="logo-current" style="margin-bottom:8px;font-size:.82rem;color:var(--muted)"></div>
@@ -450,7 +451,7 @@ function renderStreams(){
         <div class="stream-detail"><span class="label">UDP Output:</span> <span class="value">${esc(s.udp_target||'N/A')}</span></div>
         <div class="stream-detail"><span class="label">Key:</span> <span class="value">${esc(s.rtmp_key)}</span></div>
         <div class="stream-detail"><span class="label">DVR:</span> <span class="value">${s.dvr_hours}h · ${s.dvr_segments||0} segs · ${s.dvr_size_mb||0} MB</span></div>
-        <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? '🖼️ x:' + s.logo_x + ' y:' + s.logo_y : '—'}</span></div>
+        <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? `🖼️ x:${s.logo_x}% y:${s.logo_y}%` : '—'}</span></div>
         <div class="stream-detail"><span class="label">Last Online:</span> <span class="value">${s.last_online ? new Date(s.last_online).toLocaleString() : 'Never'}</span></div>
       </div>
       <div class="dvr-bar"><div class="dvr-bar-fill" style="width:${dvrPct}%" title="DVR buffer: ${dvrPct}%"></div></div>
@@ -506,8 +507,8 @@ function openAddModal(){
   document.getElementById('m-source').value = '';
   document.getElementById('m-key').value = '';
   document.getElementById('m-dvr').value = '2';
-  document.getElementById('m-logo-x').value = '10';
-  document.getElementById('m-logo-y').value = '10';
+  document.getElementById('m-logo-x').value = '5';
+  document.getElementById('m-logo-y').value = '5';
   document.getElementById('m-enabled').checked = true;
   document.getElementById('logo-upload-section').style.display = 'none';
   document.getElementById('modal').classList.add('active');
