@@ -40,29 +40,31 @@ class StreamProcess:
         self.dvr_hours = dvr_hours
         self.udp_target = udp_target
         self.rtmp_target = f"{settings.RTMP_SERVER_URL}/{self.rtmp_key}" if self.rtmp_key else None
-        
-        # Determine HLS directory for this stream
+
+        # HLS output directory for this stream
         self.hls_dir = os.path.join(settings.HLS_OUTPUT_DIR, str(stream_id))
         os.makedirs(self.hls_dir, exist_ok=True)
         self.hls_target = os.path.join(self.hls_dir, "index.m3u8")
 
         self.logo_path = logo_path
-        # logo_x / logo_y are PERCENTAGES (0–100) of video width/height.
-        # They are resolved to pixels at stream-start time after probing.
         self.logo_x = logo_x
         self.logo_y = logo_y
-        self.output_process: Optional[asyncio.subprocess.Process] = None
-        self.recorder_process: Optional[asyncio.subprocess.Process] = None
+
+        # FFmpeg processes — three separate processes for full isolation
+        self.output_process: Optional[asyncio.subprocess.Process] = None   # UDP + HLS
+        self.rtmp_process: Optional[asyncio.subprocess.Process] = None      # RTMP relay
+        self.recorder_process: Optional[asyncio.subprocess.Process] = None  # DVR recorder
+
         self.mode: StreamStatus = StreamStatus.STOPPED
-        self.manually_stopped: bool = False      # set True by manual stop; suppresses auto-restart
+        self.manually_stopped: bool = False
         self.consecutive_failures = 0
         self.last_online: Optional[datetime] = None
-        self.dvr_started_at: Optional[datetime] = None   # when DVR playback began
-        # Cached after the first successful ffprobe — reused for DVR playback
+        self.dvr_started_at: Optional[datetime] = None
+        # Cached video resolution — probed once on first live start, reused for DVR
         self._video_width: int = 1920
         self._video_height: int = 1080
-        self.lock = asyncio.Lock()          # protects FFmpeg process start/kill
-        self.check_lock = asyncio.Lock()    # prevents concurrent _check_and_act on same stream
+        self.lock = asyncio.Lock()
+        self.check_lock = asyncio.Lock()
 
     @property
     def dvr_dir(self) -> str:
@@ -204,18 +206,15 @@ class StreamProcess:
         ]
         return extra_in, codec
 
-    # ── LIVE: source → UDP multicast ─────────────────────────────────────
+    # ── LIVE: source → UDP + HLS (tee) + RTMP (separate process) ──────────
     async def start_live_output(self):
-        """Push live source directly to UDP multicast."""
+        """Push live source to UDP multicast + HLS + RTMP (separate relay)."""
         async with self.lock:
             await self._kill_output()
+            await self._kill_rtmp_relay()
+
             logger.info(f"[{self.name}] Starting LIVE → {self.udp_target}")
             has_logo = self._has_logo()
-
-            # Probe video dimensions before building the filter graph.
-            # This is essential for correct logo placement — without knowing
-            # the actual resolution, pixel coordinates are guesswork.
-            # The probe result is cached so DVR playback reuses it for free.
             if has_logo:
                 vid_w, vid_h = await self._probe_video_size()
 
@@ -231,38 +230,65 @@ class StreamProcess:
                 "-probesize", "2000000",
                 "-i", self.source_url,
             ]
+
             if has_logo:
                 extra_in, codec_args = self._build_logo_filter(vid_w, vid_h)
                 cmd += extra_in + codec_args
             else:
-                cmd += ["-c", "copy"]
-            
-            # Tee pseudo-muxer allows multiple outputs
-            outputs = [
+                cmd += ["-c", "copy", "-map", "0"]
+
+            # Tee muxer: UDP multicast + HLS simultaneously
+            tee_outputs = [
                 f"[f=mpegts:mpegts_flags=+resend_headers:pcr_period=20]{self.udp_target}",
-                f"[f=hls:hls_time=4:hls_list_size=5:hls_flags=delete_segments+append_list+temp_file]{self.hls_target}"
+                (f"[f=hls:hls_time=4:hls_list_size=6"
+                 f":hls_flags=delete_segments+append_list+temp_file"
+                 f":hls_segment_filename={self.hls_dir}/seg%05d.ts]{self.hls_target}"),
             ]
-            if self.rtmp_target:
-                outputs.append(f"[f=flv]{self.rtmp_target}")
+            cmd += ["-f", "tee", "|".join(tee_outputs)]
 
-            tee_output = "|".join(outputs)
-            
-            cmd += [
-                "-map", "0",
-                "-f", "tee",
-                tee_output
-            ]
-
-            logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
+            logger.info(f"[{self.name}] LIVE CMD: {' '.join(cmd)}")
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
             asyncio.create_task(self._log_ffmpeg(self.output_process, "live-out"))
+
+            # Start RTMP relay as an independent process (reconnects on its own)
+            if self.rtmp_target:
+                await self._start_rtmp_relay(self.source_url)
+
             self.mode = StreamStatus.LIVE
             self.consecutive_failures = 0
             self.last_online = datetime.now(timezone.utc)
+
+    async def _start_rtmp_relay(self, source_url: str):
+        """Push stream to RTMP server as a separate resilient process."""
+        await self._kill_rtmp_relay()
+        cmd = [settings.FFMPEG_PATH]
+        if source_url.lower().startswith("rtsp://"):
+            cmd += ["-rtsp_transport", "tcp"]
+        else:
+            cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "5"]
+        cmd += [
+            "-fflags", "+genpts+discardcorrupt",
+            "-analyzeduration", "2000000",
+            "-probesize", "2000000",
+            "-i", source_url,
+            "-c", "copy",
+            "-map", "0",
+            "-f", "flv",
+            "-flvflags", "no_duration_filesize",
+            self.rtmp_target,
+        ]
+        logger.info(f"[{self.name}] RTMP CMD: {' '.join(cmd)}")
+        self.rtmp_process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        asyncio.create_task(self._log_ffmpeg(self.rtmp_process, "rtmp-relay"))
 
     # ── DVR RECORDER: source → .ts segments (only while live) ────────────
     async def start_dvr_recording(self):
@@ -320,23 +346,24 @@ class StreamProcess:
             await self._kill_recorder()
             logger.info(f"[{self.name}] DVR recording stopped")
 
-    # ── DVR PLAYBACK: .ts segments → UDP multicast (failover) ────────────
+    # ── DVR PLAYBACK: .ts segments → UDP + HLS + RTMP (failover) ────────
     async def start_dvr_playback(self):
-        """Loop recent DVR segments to UDP multicast."""
+        """Loop recent DVR segments to UDP + HLS + RTMP (automatic failover)."""
         async with self.lock:
             await self._kill_output()
             await self._kill_recorder()
+            await self._kill_rtmp_relay()
+
             segments = self._get_recent_segments()
             if not segments:
-                logger.warning(f"[{self.name}] No DVR segments — output goes dark")
+                logger.warning(f"[{self.name}] No DVR segments available — channel goes dark")
                 self.mode = StreamStatus.DOWN
                 return
 
-            # Write a snapshot playlist — only include segments that exist RIGHT NOW
-            # so FFmpeg doesn't crash when cleanup later removes old ones
+            # Snapshot playlist — only existing segments so FFmpeg doesn't crash
+            # if cleanup later removes files still referenced
             concat_path = os.path.join(self.dvr_dir, "playlist.txt")
-            # Keep only the most recent 30 min of segments for the loop to stay fresh
-            keep_secs = min(self.dvr_hours * 3600, 1800)
+            keep_secs = min(self.dvr_hours * 3600, 1800)  # max 30 min loop window
             cutoff = time.time() - keep_secs
             playlist_segs = [s for s in segments if os.path.getmtime(s) >= cutoff] or segments
             with open(concat_path, "w") as f:
@@ -344,10 +371,10 @@ class StreamProcess:
                     f.write(f"file '{seg}'\n")
 
             logger.info(
-                f"[{self.name}] Starting DVR playback "
-                f"({len(playlist_segs)} segments, {keep_secs//60:.0f} min window)"
-                f" → {self.udp_target}"
+                f"[{self.name}] Starting DVR failover playback "
+                f"({len(playlist_segs)} segments, {keep_secs//60:.0f} min window) → {self.udp_target}"
             )
+
             cmd = [
                 settings.FFMPEG_PATH,
                 "-re",
@@ -356,44 +383,68 @@ class StreamProcess:
                 "-f", "concat", "-safe", "0",
                 "-i", concat_path,
             ]
+
             if self._has_logo():
-                # Reuse cached resolution — live probe already ran; no extra
-                # network call needed during failover.
                 extra_in, codec_args = self._build_logo_filter(
                     self._video_width, self._video_height
                 )
                 cmd += extra_in + codec_args
             else:
-                cmd += ["-c", "copy"]
-            
-            outputs = [
-                f"[f=mpegts:mpegts_flags=+resend_headers:pcr_period=20]{self.udp_target}",
-                f"[f=hls:hls_time=4:hls_list_size=5:hls_flags=delete_segments]{self.hls_target}"
-            ]
-            if self.rtmp_target:
-                outputs.append(f"[f=flv]{self.rtmp_target}")
+                cmd += ["-c", "copy", "-map", "0"]
 
-            tee_output = "|".join(outputs)
-            cmd += [
-                "-f", "tee",
-                tee_output
+            # Tee muxer: UDP + HLS
+            tee_outputs = [
+                f"[f=mpegts:mpegts_flags=+resend_headers:pcr_period=20]{self.udp_target}",
+                (f"[f=hls:hls_time=4:hls_list_size=6"
+                 f":hls_flags=delete_segments+append_list+temp_file"
+                 f":hls_segment_filename={self.hls_dir}/seg%05d.ts]{self.hls_target}"),
             ]
+            cmd += ["-f", "tee", "|".join(tee_outputs)]
 
             logger.info(f"[{self.name}] DVR CMD: {' '.join(cmd)}")
-
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
             asyncio.create_task(self._log_ffmpeg(self.output_process, "dvr-play"))
+
+            # Also relay DVR to RTMP using concat source
+            if self.rtmp_target:
+                await self._start_rtmp_relay_from_concat(concat_path)
+
             self.mode = StreamStatus.DVR
             self.dvr_started_at = datetime.now(timezone.utc)
+
+    async def _start_rtmp_relay_from_concat(self, concat_path: str):
+        """Push DVR loop to RTMP as a separate process."""
+        await self._kill_rtmp_relay()
+        cmd = [
+            settings.FFMPEG_PATH,
+            "-re",
+            "-fflags", "+genpts+igndts",
+            "-stream_loop", "-1",
+            "-f", "concat", "-safe", "0",
+            "-i", concat_path,
+            "-c", "copy",
+            "-map", "0",
+            "-f", "flv",
+            "-flvflags", "no_duration_filesize",
+            self.rtmp_target,
+        ]
+        logger.info(f"[{self.name}] DVR-RTMP CMD: {' '.join(cmd)}")
+        self.rtmp_process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        asyncio.create_task(self._log_ffmpeg(self.rtmp_process, "dvr-rtmp"))
 
     # ── stop all ─────────────────────────────────────────────────────────
     async def stop(self):
         async with self.lock:
             await self._kill_output()
+            await self._kill_rtmp_relay()
             await self._kill_recorder()
             self.mode = StreamStatus.STOPPED
             self.manually_stopped = True
@@ -410,6 +461,18 @@ class StreamProcess:
                 except Exception:
                     pass
             self.output_process = None
+
+    async def _kill_rtmp_relay(self):
+        if self.rtmp_process and self.rtmp_process.returncode is None:
+            try:
+                self.rtmp_process.terminate()
+                await asyncio.wait_for(self.rtmp_process.wait(), timeout=5)
+            except Exception:
+                try:
+                    self.rtmp_process.kill()
+                except Exception:
+                    pass
+            self.rtmp_process = None
 
     async def _kill_recorder(self):
         if self.recorder_process and self.recorder_process.returncode is None:
@@ -650,15 +713,22 @@ class Engine:
                     await sp.start_live_output()
                     await sp.start_dvr_recording()
                     await self._log(sp.stream_id, "live",
-                                    "Source online — streaming LIVE to UDP multicast")
+                                    "Source online — streaming LIVE to UDP + HLS + RTMP")
                     await self._broadcast(sp)
                 else:
+                    # Restart dead sub-processes individually without full restart
                     if sp.output_process and sp.output_process.returncode is not None:
-                        logger.warning(f"[{sp.name}] Live output process died — restarting")
+                        logger.warning(f"[{sp.name}] Live output (UDP/HLS) died — restarting")
                         await sp.start_live_output()
-                    if sp.recorder_process and sp.recorder_process.returncode is not None:
-                        logger.warning(f"[{sp.name}] DVR recorder process died — restarting")
-                        await sp.start_dvr_recording()
+                    else:
+                        # Check RTMP relay separately — restart without touching UDP/HLS
+                        if sp.rtmp_target and (sp.rtmp_process is None or
+                                               sp.rtmp_process.returncode is not None):
+                            logger.warning(f"[{sp.name}] RTMP relay died — restarting relay only")
+                            await sp._start_rtmp_relay(sp.source_url)
+                        if sp.recorder_process and sp.recorder_process.returncode is not None:
+                            logger.warning(f"[{sp.name}] DVR recorder died — restarting")
+                            await sp.start_dvr_recording()
             else:
                 sp.consecutive_failures += 1
                 threshold = settings.HEALTH_CHECK_FAILURES_BEFORE_DOWN
@@ -667,11 +737,11 @@ class Engine:
                 ):
                     logger.warning(
                         f"[{sp.name}] Source DOWN ({sp.consecutive_failures} failures) "
-                        f"— switching to DVR playback"
+                        f"— switching to DVR failover playback"
                     )
                     await sp.start_dvr_playback()
                     await self._log(sp.stream_id, "dvr",
-                                    "Source offline — playing DVR to UDP multicast")
+                                    "Source offline — DVR failover active on UDP + HLS + RTMP")
                     await self._broadcast(sp)
                 elif sp.mode == StreamStatus.DVR:
                     playlist_age_secs = (
@@ -688,6 +758,14 @@ class Engine:
                             await self._log(sp.stream_id, "down",
                                             "DVR playback failed — no segments available")
                             await self._broadcast(sp)
+                    else:
+                        # Check RTMP relay during DVR — restart if it died
+                        if sp.rtmp_target and (sp.rtmp_process is None or
+                                               sp.rtmp_process.returncode is not None):
+                            concat_path = os.path.join(sp.dvr_dir, "playlist.txt")
+                            if os.path.exists(concat_path):
+                                logger.warning(f"[{sp.name}] DVR RTMP relay died — restarting")
+                                await sp._start_rtmp_relay_from_concat(concat_path)
                 elif sp.mode == StreamStatus.DOWN:
                     if sp._get_recent_segments():
                         logger.info(f"[{sp.name}] DVR segments found — retrying playback")
