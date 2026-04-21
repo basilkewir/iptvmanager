@@ -457,12 +457,46 @@ class Engine:
         if self._running:
             return
         self._running = True
+        # Kill any FFmpeg processes left over from a previous run of this service.
+        # Without this, a service restart leaves orphaned FFmpeg writing to the
+        # same UDP ports — the receiver gets a corrupted mix of two streams.
+        await self._kill_orphaned_ffmpeg()
         async with async_session() as db:
             result = await db.execute(select(Stream).where(Stream.enabled == True))
             for s in result.scalars().all():
                 self._register(s)
         self._task = asyncio.create_task(self._loop())
         logger.info("Engine started")
+
+    async def _kill_orphaned_ffmpeg(self):
+        """
+        On startup, terminate any ffmpeg/ffprobe processes already running
+        under this user account. This prevents port collisions after a service
+        crash or restart where the old process wasn't cleaned up gracefully.
+        """
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["pgrep", "-u", str(os.getuid()), "ffmpeg"],
+                capture_output=True, text=True
+            )
+            pids = result.stdout.strip().split()
+            if pids:
+                logger.warning(f"Engine startup: killing {len(pids)} orphaned ffmpeg process(es): {pids}")
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), 15)  # SIGTERM
+                    except ProcessLookupError:
+                        pass
+                await asyncio.sleep(2)  # allow graceful exit
+                # SIGKILL any that are still alive
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), 9)
+                    except ProcessLookupError:
+                        pass  # already gone
+        except Exception as e:
+            logger.warning(f"Could not check for orphaned ffmpeg processes: {e}")
 
     async def shutdown(self):
         self._running = False
