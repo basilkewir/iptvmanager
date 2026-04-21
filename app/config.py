@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 from pydantic import ConfigDict
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(extra="ignore")   # silently ignore unknown .env keys
+    model_config = ConfigDict(extra="ignore", env_file=".env")
 
     APP_NAME: str = "IPTV Manager"
     APP_HOST: str = "0.0.0.0"
@@ -27,9 +27,6 @@ class Settings(BaseSettings):
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"
     LOG_LEVEL: str = "INFO"
-
-    class Config:
-        env_file = ".env"
 
 settings = Settings()
 os.makedirs(settings.DVR_STORAGE_PATH, exist_ok=True)
