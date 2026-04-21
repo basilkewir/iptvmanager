@@ -65,6 +65,9 @@ class StreamProcess:
         self._video_height: int = 1080
         self.lock = asyncio.Lock()
         self.check_lock = asyncio.Lock()
+        # RTMP exponential backoff — avoids hammering a dead RTMP server
+        self._rtmp_fail_count: int = 0
+        self._rtmp_next_retry: float = 0.0  # epoch seconds
 
     @property
     def dvr_dir(self) -> str:
@@ -263,7 +266,16 @@ class StreamProcess:
             self.last_online = datetime.now(timezone.utc)
 
     async def _start_rtmp_relay(self, source_url: str):
-        """Push stream to RTMP server as a separate resilient process."""
+        """Push stream to RTMP server as a separate resilient process.
+        Uses exponential backoff: 10s → 20s → 40s → ... → max 300s between retries.
+        """
+        if not self.rtmp_target:
+            return
+        now = time.time()
+        if now < self._rtmp_next_retry:
+            wait_secs = int(self._rtmp_next_retry - now)
+            logger.debug(f"[{self.name}] RTMP backoff: {wait_secs}s remaining before retry")
+            return
         await self._kill_rtmp_relay()
         cmd = [settings.FFMPEG_PATH]
         if source_url.lower().startswith("rtsp://"):
@@ -288,7 +300,7 @@ class StreamProcess:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        asyncio.create_task(self._log_ffmpeg(self.rtmp_process, "rtmp-relay"))
+        asyncio.create_task(self._log_ffmpeg_rtmp(self.rtmp_process, "rtmp-relay"))
 
     # ── DVR RECORDER: source → .ts segments (only while live) ────────────
     async def start_dvr_recording(self):
@@ -417,7 +429,12 @@ class StreamProcess:
             self.dvr_started_at = datetime.now(timezone.utc)
 
     async def _start_rtmp_relay_from_concat(self, concat_path: str):
-        """Push DVR loop to RTMP as a separate process."""
+        """Push DVR loop to RTMP as a separate process. Uses same backoff as live relay."""
+        if not self.rtmp_target:
+            return
+        now = time.time()
+        if now < self._rtmp_next_retry:
+            return
         await self._kill_rtmp_relay()
         cmd = [
             settings.FFMPEG_PATH,
@@ -438,7 +455,7 @@ class StreamProcess:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        asyncio.create_task(self._log_ffmpeg(self.rtmp_process, "dvr-rtmp"))
+        asyncio.create_task(self._log_ffmpeg_rtmp(self.rtmp_process, "dvr-rtmp"))
 
     # ── stop all ─────────────────────────────────────────────────────────
     async def stop(self):
@@ -509,6 +526,52 @@ class StreamProcess:
             rc = proc.returncode
             if rc is not None and rc != 0:
                 logger.error(f"[{self.name}] ffmpeg({label}) exited with code {rc}")
+
+    async def _log_ffmpeg_rtmp(self, proc: asyncio.subprocess.Process, label: str):
+        """Like _log_ffmpeg but applies exponential backoff on connection failures."""
+        connection_refused = False
+        try:
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                msg = line.decode(errors="ignore").strip()
+                if not msg:
+                    continue
+                low = msg.lower()
+                if "connection refused" in low or "network is unreachable" in low:
+                    connection_refused = True
+                    logger.warning(f"[{self.name}] ffmpeg({label}): {msg}")
+                elif any(k in low for k in ("error", "invalid", "failed", "no such", "unable")):
+                    logger.error(f"[{self.name}] ffmpeg({label}): {msg}")
+                elif any(k in low for k in ("warning", "deprecated")):
+                    logger.warning(f"[{self.name}] ffmpeg({label}): {msg}")
+                else:
+                    logger.debug(f"[{self.name}] ffmpeg({label}): {msg}")
+        except Exception:
+            pass
+        finally:
+            rc = proc.returncode
+            if rc is not None and rc != 0:
+                if connection_refused:
+                    # Exponential backoff: 10 → 20 → 40 → 80 → max 300 seconds
+                    self._rtmp_fail_count += 1
+                    delay = min(10 * (2 ** (self._rtmp_fail_count - 1)), 300)
+                    self._rtmp_next_retry = time.time() + delay
+                    logger.warning(
+                        f"[{self.name}] RTMP server not reachable at {self.rtmp_target} "
+                        f"(attempt {self._rtmp_fail_count}) — retrying in {delay}s. "
+                        f"Make sure an RTMP server is running on port 1935."
+                    )
+                else:
+                    # Non-connection error — shorter retry
+                    self._rtmp_fail_count = max(self._rtmp_fail_count, 1)
+                    self._rtmp_next_retry = time.time() + 10
+                    logger.error(f"[{self.name}] ffmpeg({label}) exited with code {rc}")
+            else:
+                # Successful exit — reset backoff
+                self._rtmp_fail_count = 0
+                self._rtmp_next_retry = 0.0
 
     def _get_recent_segments(self) -> list[str]:
         cutoff = time.time() - (self.dvr_hours * 3600)

@@ -64,9 +64,12 @@ async def test_outputs(stream_id: int):
 
     # Test HLS playlist
     hls_path = os.path.join(settings.HLS_OUTPUT_DIR, str(stream_id), "index.m3u8")
+    hls_exists = os.path.exists(hls_path)
+    hls_size = os.path.getsize(hls_path) if hls_exists else 0
     results["tests"]["hls_playlist"] = {
-        "exists": os.path.exists(hls_path),
-        "size": os.path.getsize(hls_path) if os.path.exists(hls_path) else 0
+        "exists": hls_exists,
+        "size": hls_size,
+        "status": "ok" if hls_size > 0 else ("empty" if hls_exists else "missing")
     }
 
     # Test UDP process
@@ -158,26 +161,40 @@ async def index():
 # This endpoint spawns FFmpeg to read the UDP output and pipe raw MPEG-TS over HTTP.
 # One FFmpeg relay process is created per connecting client (Flussonic = 1 connection).
 
+
 @app.get("/ts/{stream_id}")
 async def ts_http_stream(stream_id: int):
     """
-    HTTP MPEG-TS output — use as: ts+http://192.168.1.206:8000/ts/{stream_id}
-    Compatible with Flussonic, tvheadend, VLC, ffplay, and all IPTV middleware.
+    HTTP MPEG-TS output — use as: ts+http://YOUR_SERVER_IP:8000/ts/{stream_id}
+    Compatible with Flussonic (ts+http://), tvheadend, VLC, ffplay, and all IPTV middleware.
+
+    Reads from the HLS output (which is always available when the stream is live),
+    and re-streams as raw MPEG-TS over HTTP for maximum compatibility.
     """
     sp = engine.streams.get(stream_id)
     if not sp:
         return Response(status_code=404, content=f"Stream {stream_id} not found")
-    if sp.udp_target is None:
-        return Response(status_code=503, content="Stream not active")
 
-    udp_src = sp.udp_target
+    # Check HLS playlist exists (means stream is actually outputting)
+    hls_playlist = os.path.join(settings.HLS_OUTPUT_DIR, str(stream_id), "index.m3u8")
+    if not os.path.exists(hls_playlist) or os.path.getsize(hls_playlist) == 0:
+        return Response(
+            status_code=503,
+            content="Stream not ready — HLS output not yet available. Wait a few seconds and retry."
+        )
+
+    # Read from HLS (working) rather than UDP (sending only, can't easily receive back)
+    hls_url = f"http://127.0.0.1:{settings.APP_PORT}/hls/{stream_id}/index.m3u8"
 
     async def generate():
         proc = await asyncio.create_subprocess_exec(
             settings.FFMPEG_PATH,
             "-hide_banner",
             "-loglevel", "error",
-            "-i", udp_src,
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "3",
+            "-i", hls_url,
             "-c", "copy",
             "-map", "0",
             "-f", "mpegts",
@@ -209,3 +226,4 @@ async def ts_http_stream(stream_id: int):
             "X-Content-Type-Options": "nosniff",
         },
     )
+
