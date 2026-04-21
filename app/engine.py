@@ -508,14 +508,30 @@ class Engine:
 
     # ── stream management ─────────────────────────────────────────────────
     def _make_udp_target(self, stream: Stream) -> str:
+        """Build the FFmpeg UDP output URL.
+
+        Supports both multicast (239.x.x.x) and unicast targets.
+        When UDP_MULTICAST_INTERFACE is set, binds to that local IP so
+        FFmpeg sends packets out the correct NIC (same as Flussonic localaddr).
+        """
         port = settings.UDP_MULTICAST_PORT_START + stream.id
-        return (
-            f"{settings.UDP_MULTICAST_BASE}:{port}"
-            f"?pkt_size=1316"
-            f"&buffer_size=4194304"
-            f"&ttl={settings.UDP_TTL}"
-            f"&overrun_nonfatal=1"
+        base = settings.UDP_MULTICAST_BASE  # e.g. udp://239.0.0.1 or udp://192.168.1.123
+        is_multicast = any(
+            base.replace("udp://", "").startswith(prefix)
+            for prefix in ("224.", "225.", "226.", "227.", "228.", "229.",
+                           "230.", "231.", "232.", "233.", "234.", "235.",
+                           "236.", "237.", "238.", "239.")
         )
+        params = [
+            f"pkt_size=1316",
+            f"buffer_size=4194304",
+            f"overrun_nonfatal=1",
+        ]
+        if is_multicast:
+            params.append(f"ttl={settings.UDP_TTL}")
+        if settings.UDP_MULTICAST_INTERFACE:
+            params.append(f"localaddr={settings.UDP_MULTICAST_INTERFACE}")
+        return f"{base}:{port}?" + "&".join(params)
 
     def _register(self, s: Stream) -> StreamProcess:
         udp = self._make_udp_target(s)

@@ -1,7 +1,10 @@
 import os
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(extra="ignore")   # silently ignore unknown .env keys
+
     APP_NAME: str = "IPTV Manager"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
@@ -18,6 +21,9 @@ class Settings(BaseSettings):
     UDP_MULTICAST_PORT_START: int = 5000
     UDP_TTL: int = 16
     UDP_BUFFER_SIZE: int = 1316
+    # Set to your server's LAN IP to force FFmpeg to send out the correct interface
+    # e.g. UDP_MULTICAST_INTERFACE=192.168.1.206
+    UDP_MULTICAST_INTERFACE: str = ""
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"
     LOG_LEVEL: str = "INFO"
