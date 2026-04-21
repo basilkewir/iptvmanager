@@ -24,10 +24,13 @@ class Settings(BaseSettings):
     # Set to your server's LAN IP to force FFmpeg to send out the correct interface
     # e.g. UDP_MULTICAST_INTERFACE=192.168.1.206
     UDP_MULTICAST_INTERFACE: str = ""
+    RTMP_SERVER_URL: str = "rtmp://127.0.0.1:1935/live"
+    HLS_OUTPUT_DIR: str = "./data/hls"
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"
     LOG_LEVEL: str = "INFO"
 
 settings = Settings()
 os.makedirs(settings.DVR_STORAGE_PATH, exist_ok=True)
+os.makedirs(settings.HLS_OUTPUT_DIR, exist_ok=True)
 os.makedirs("data", exist_ok=True)

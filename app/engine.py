@@ -39,6 +39,13 @@ class StreamProcess:
         self.rtmp_key = rtmp_key
         self.dvr_hours = dvr_hours
         self.udp_target = udp_target
+        self.rtmp_target = f"{settings.RTMP_SERVER_URL}/{self.rtmp_key}" if self.rtmp_key else None
+        
+        # Determine HLS directory for this stream
+        self.hls_dir = os.path.join(settings.HLS_OUTPUT_DIR, str(stream_id))
+        os.makedirs(self.hls_dir, exist_ok=True)
+        self.hls_target = os.path.join(self.hls_dir, "index.m3u8")
+
         self.logo_path = logo_path
         # logo_x / logo_y are PERCENTAGES (0–100) of video width/height.
         # They are resolved to pixels at stream-start time after probing.
@@ -229,12 +236,23 @@ class StreamProcess:
                 cmd += extra_in + codec_args
             else:
                 cmd += ["-c", "copy"]
-            cmd += [
-                "-f", "mpegts",
-                "-mpegts_flags", "+resend_headers",
-                "-pcr_period", "20",
-                self.udp_target,
+            
+            # Tee pseudo-muxer allows multiple outputs
+            outputs = [
+                f"[f=mpegts:mpegts_flags=+resend_headers:pcr_period=20]{self.udp_target}",
+                f"[f=hls:hls_time=4:hls_list_size=5:hls_flags=delete_segments+append_list+temp_file]{self.hls_target}"
             ]
+            if self.rtmp_target:
+                outputs.append(f"[f=flv]{self.rtmp_target}")
+
+            tee_output = "|".join(outputs)
+            
+            cmd += [
+                "-map", "0",
+                "-f", "tee",
+                tee_output
+            ]
+
             logger.info(f"[{self.name}] CMD: {' '.join(cmd)}")
             self.output_process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -348,11 +366,17 @@ class StreamProcess:
             else:
                 cmd += ["-c", "copy"]
             
+            outputs = [
+                f"[f=mpegts:mpegts_flags=+resend_headers:pcr_period=20]{self.udp_target}",
+                f"[f=hls:hls_time=4:hls_list_size=5:hls_flags=delete_segments]{self.hls_target}"
+            ]
+            if self.rtmp_target:
+                outputs.append(f"[f=flv]{self.rtmp_target}")
+
+            tee_output = "|".join(outputs)
             cmd += [
-                "-f", "mpegts",
-                "-mpegts_flags", "+resend_headers",
-                "-pcr_period", "20",
-                self.udp_target
+                "-f", "tee",
+                tee_output
             ]
 
             logger.info(f"[{self.name}] DVR CMD: {' '.join(cmd)}")
