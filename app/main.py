@@ -45,6 +45,46 @@ async def health_check():
         "streams": {"total": total, "live": live, "dvr": dvr, "down": down},
     })
 
+@app.get("/api/test-outputs/{stream_id}")
+async def test_outputs(stream_id: int):
+    """Test all output URLs for a stream to verify they're accessible."""
+    sp = engine.streams.get(stream_id)
+    if not sp:
+        return JSONResponse({"error": f"Stream {stream_id} not found"}, status_code=404)
+
+    results = {
+        "stream_id": stream_id,
+        "stream_name": sp.name,
+        "udp_target": sp.udp_target,
+        "rtmp_target": sp.rtmp_target,
+        "hls_url": f"http://localhost:{settings.APP_PORT}/hls/{stream_id}/index.m3u8",
+        "flussonic_ts_url": f"ts+http://localhost:{settings.APP_PORT}/ts/{stream_id}",
+        "tests": {}
+    }
+
+    # Test HLS playlist
+    hls_path = os.path.join(settings.HLS_OUTPUT_DIR, str(stream_id), "index.m3u8")
+    results["tests"]["hls_playlist"] = {
+        "exists": os.path.exists(hls_path),
+        "size": os.path.getsize(hls_path) if os.path.exists(hls_path) else 0
+    }
+
+    # Test UDP process
+    results["tests"]["udp_process"] = {
+        "running": sp.output_process is not None and sp.output_process.returncode is None
+    }
+
+    # Test RTMP process
+    results["tests"]["rtmp_process"] = {
+        "running": sp.rtmp_process is not None and sp.rtmp_process.returncode is None
+    }
+
+    # Test DVR segments
+    dvr_segments = len(sp._get_recent_segments()) if hasattr(sp, '_get_recent_segments') else 0
+    results["tests"]["dvr_segments"] = {"count": dvr_segments}
+
+    return JSONResponse(results)
+
 # Serve static frontend
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

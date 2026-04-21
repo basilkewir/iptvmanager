@@ -497,7 +497,9 @@ class StreamProcess:
                     continue
                 # Surface errors and warnings prominently; suppress verbose info
                 low = msg.lower()
-                if any(k in low for k in ("error", "invalid", "failed", "no such", "unable")):
+                if any(k in low for k in ("error", "invalid", "failed", "no such", "unable", "connection refused", "network is unreachable")):
+                    logger.error(f"[{self.name}] ffmpeg({label}): {msg}")
+                elif any(k in low for k in ("warning", "deprecated")):
                     logger.warning(f"[{self.name}] ffmpeg({label}): {msg}")
                 else:
                     logger.debug(f"[{self.name}] ffmpeg({label}): {msg}")
@@ -506,7 +508,7 @@ class StreamProcess:
         finally:
             rc = proc.returncode
             if rc is not None and rc != 0:
-                logger.warning(f"[{self.name}] ffmpeg({label}) exited with code {rc}")
+                logger.error(f"[{self.name}] ffmpeg({label}) exited with code {rc}")
 
     def _get_recent_segments(self) -> list[str]:
         cutoff = time.time() - (self.dvr_hours * 3600)
