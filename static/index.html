@@ -448,7 +448,27 @@ function renderStreams(){
       </div>
       <div class="stream-details">
         <div class="stream-detail"><span class="label">Source:</span> <span class="value">${esc(s.source_url)}</span></div>
-        <div class="stream-detail"><span class="label">UDP Output:</span> <span class="value">${esc(s.udp_target||'N/A')}</span></div>
+        <div class="stream-detail">
+          <span class="label">📡 UDP:</span>
+          <span class="value" style="display:flex;align-items:center;gap:6px">
+            <code style="font-size:.78rem;background:rgba(99,102,241,.1);padding:2px 6px;border-radius:4px;color:var(--accent)">${esc(s.udp_target||'N/A')}</code>
+            ${s.udp_target ? `<button class="btn btn-sm btn-outline" style="padding:2px 7px;font-size:.72rem" onclick="copyText('${esc(s.udp_target)}')">📋</button>` : ''}
+          </span>
+        </div>
+        <div class="stream-detail">
+          <span class="label">📺 HLS:</span>
+          <span class="value" style="display:flex;align-items:center;gap:6px">
+            <code style="font-size:.78rem;background:rgba(59,130,246,.1);padding:2px 6px;border-radius:4px;color:var(--blue)">${location.protocol}//${location.host}${s.hls_url||''}</code>
+            ${s.hls_url ? `<button class="btn btn-sm btn-outline" style="padding:2px 7px;font-size:.72rem" onclick="copyText('${location.protocol}//${location.host}${s.hls_url}')">📋</button>` : ''}
+          </span>
+        </div>
+        <div class="stream-detail">
+          <span class="label">🎬 RTMP:</span>
+          <span class="value" style="display:flex;align-items:center;gap:6px">
+            <code style="font-size:.78rem;background:rgba(34,197,94,.1);padding:2px 6px;border-radius:4px;color:var(--green)">${esc(s.rtmp_url||'Not configured')}</code>
+            ${s.rtmp_url ? `<button class="btn btn-sm btn-outline" style="padding:2px 7px;font-size:.72rem" onclick="copyText('${esc(s.rtmp_url)}')">📋</button>` : ''}
+          </span>
+        </div>
         <div class="stream-detail"><span class="label">Key:</span> <span class="value">${esc(s.rtmp_key)}</span></div>
         <div class="stream-detail"><span class="label">DVR:</span> <span class="value">${s.dvr_hours}h · ${s.dvr_segments||0} segs · ${s.dvr_size_mb||0} MB</span></div>
         <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? `🖼️ x:${s.logo_x}% y:${s.logo_y}%` : '—'}</span></div>
@@ -472,6 +492,17 @@ function updateStats(){
 
 function statusIcon(s){ return {live:'🟢',dvr:'🟡',down:'🔴',stopped:'⚪'}[s]||'⚪'; }
 function esc(s){ return s ? s.replace(/</g,'&lt;').replace(/>/g,'&gt;') : ''; }
+function copyText(text){
+  navigator.clipboard.writeText(text).then(()=>toast('Copied to clipboard')).catch(()=>{
+    const el = document.createElement('textarea');
+    el.value = text;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+    toast('Copied to clipboard');
+  });
+}
 
 // Search
 document.addEventListener('DOMContentLoaded', ()=>{
@@ -681,7 +712,9 @@ async function loadStatus(){
           <h3>${esc(s.name)} <span class="badge badge-${s.status}">${statusIcon(s.status)} ${s.status}</span></h3>
         </div>
         <div class="stream-details">
-          <div class="stream-detail"><span class="label">UDP:</span> <span class="value">${esc(s.udp_target||'')}</span></div>
+          <div class="stream-detail"><span class="label">📡 UDP:</span> <span class="value"><code style="font-size:.78rem;background:rgba(99,102,241,.1);padding:2px 6px;border-radius:4px;color:var(--accent)">${esc(s.udp_target||'')}</code></span></div>
+          <div class="stream-detail"><span class="label">📺 HLS:</span> <span class="value"><code style="font-size:.78rem;background:rgba(59,130,246,.1);padding:2px 6px;border-radius:4px;color:var(--blue)">${location.protocol}//${location.host}${s.hls_url||''}</code></span></div>
+          <div class="stream-detail"><span class="label">🎬 RTMP:</span> <span class="value"><code style="font-size:.78rem;background:rgba(34,197,94,.1);padding:2px 6px;border-radius:4px;color:var(--green)">${esc(s.rtmp_url||'N/A')}</code></span></div>
           <div class="stream-detail"><span class="label">DVR Segments:</span> <span class="value">${s.dvr_segments||0}</span></div>
           <div class="stream-detail"><span class="label">Failures:</span> <span class="value">${s.consecutive_failures}</span></div>
           <div class="stream-detail"><span class="label">Last Online:</span> <span class="value">${s.last_online ? new Date(s.last_online).toLocaleString() : 'Never'}</span></div>

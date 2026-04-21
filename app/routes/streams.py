@@ -22,6 +22,15 @@ def _udp_for(s: Stream) -> str:
     port = settings.UDP_MULTICAST_PORT_START + s.id
     return f"{settings.UDP_MULTICAST_BASE}:{port}"
 
+def _hls_for(s: Stream) -> str:
+    return f"/hls/{s.id}/index.m3u8"
+
+def _rtmp_for(s: Stream) -> str:
+    from app.config import settings
+    if s.rtmp_key:
+        return f"{settings.RTMP_SERVER_URL}/{s.rtmp_key}"
+    return None
+
 def _stream_out(s: Stream, dvr_segs: int = 0, dvr_size_mb: float = 0.0,
                 recorder_running: bool = False) -> StreamOut:
     return StreamOut(
@@ -29,6 +38,8 @@ def _stream_out(s: Stream, dvr_segs: int = 0, dvr_size_mb: float = 0.0,
         enabled=s.enabled, status=s.status.value if s.status else "stopped",
         dvr_enabled=s.dvr_enabled, dvr_hours=s.dvr_hours,
         udp_target=_udp_for(s),
+        hls_url=_hls_for(s),
+        rtmp_url=_rtmp_for(s),
         last_online=s.last_online.isoformat() if s.last_online else None,
         consecutive_failures=s.consecutive_failures or 0,
         logo_path=s.logo_path,

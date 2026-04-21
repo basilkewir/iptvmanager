@@ -46,6 +46,11 @@ async def health_check():
 # Serve static frontend
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Serve HLS segments
+import os as _os
+_os.makedirs(settings.HLS_OUTPUT_DIR, exist_ok=True)
+app.mount("/hls", StaticFiles(directory=settings.HLS_OUTPUT_DIR), name="hls")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index():

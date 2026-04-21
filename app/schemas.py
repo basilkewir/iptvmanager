@@ -39,6 +39,8 @@ class StreamOut(BaseModel):
     dvr_enabled: bool
     dvr_hours: int
     udp_target: Optional[str] = None
+    hls_url: Optional[str] = None
+    rtmp_url: Optional[str] = None
     last_online: Optional[str] = None
     consecutive_failures: int = 0
     logo_path: Optional[str] = None
