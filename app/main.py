@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response, StreamingResponse
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import time
 import os
@@ -111,3 +112,60 @@ async def hls_segment(stream_id: int, segment: str):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return FileResponse("static/index.html")
+
+# ── HTTP MPEG-TS streaming endpoint ──────────────────────────────────────────
+# Flussonic uses "ts+http://server:port/ts/{stream_id}" as its input format.
+# This endpoint spawns FFmpeg to read the UDP output and pipe raw MPEG-TS over HTTP.
+# One FFmpeg relay process is created per connecting client (Flussonic = 1 connection).
+
+@app.get("/ts/{stream_id}")
+async def ts_http_stream(stream_id: int):
+    """
+    HTTP MPEG-TS output — use as: ts+http://192.168.1.206:8000/ts/{stream_id}
+    Compatible with Flussonic, tvheadend, VLC, ffplay, and all IPTV middleware.
+    """
+    sp = engine.streams.get(stream_id)
+    if not sp:
+        return Response(status_code=404, content=f"Stream {stream_id} not found")
+    if sp.udp_target is None:
+        return Response(status_code=503, content="Stream not active")
+
+    udp_src = sp.udp_target
+
+    async def generate():
+        proc = await asyncio.create_subprocess_exec(
+            settings.FFMPEG_PATH,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", udp_src,
+            "-c", "copy",
+            "-map", "0",
+            "-f", "mpegts",
+            "-mpegts_flags", "+resend_headers",
+            "pipe:1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            while True:
+                chunk = await proc.stdout.read(65536)  # 64 KB chunks
+                if not chunk:
+                    break
+                yield chunk
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        generate(),
+        media_type="video/MP2T",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

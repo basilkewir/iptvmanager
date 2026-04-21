@@ -463,6 +463,13 @@ function renderStreams(){
           </span>
         </div>
         <div class="stream-detail">
+          <span class="label">📡 Flussonic TS:</span>
+          <span class="value" style="display:flex;align-items:center;gap:6px">
+            <code style="font-size:.78rem;background:rgba(234,179,8,.1);padding:2px 6px;border-radius:4px;color:var(--yellow)">ts+http://${location.hostname}:${location.port||'8000'}/ts/${s.id}</code>
+            <button class="btn btn-sm btn-outline" style="padding:2px 7px;font-size:.72rem" onclick="copyText('ts+http://${location.hostname}:${location.port||'8000'}/ts/${s.id}')">📋</button>
+          </span>
+        </div>
+        <div class="stream-detail">
           <span class="label">🎬 RTMP:</span>
           <span class="value" style="display:flex;align-items:center;gap:6px">
             <code style="font-size:.78rem;background:rgba(34,197,94,.1);padding:2px 6px;border-radius:4px;color:var(--green)">${esc(s.rtmp_url||'Not configured')}</code>
