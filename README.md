@@ -1,6 +1,108 @@
 # IPTV Manager
 
-A self-hosted IPTV stream controller with automatic live/DVR failover, RTMP push to Flussonic, and a web dashboard with authentication.
+A self-hosted IPTV stream controller — health checks, live→DVR failover, UDP multicast output, logo overlay, and a real-time web dashboard.
+
+## What It Does
+
+```
+Source Stream (HLS/RTSP/HTTP) → Engine → UDP Multicast (239.0.0.1:500X)
+                                       → DVR Segments (.ts files, looped on failure)
+```
+
+- **LIVE**: Monitors source streams via ffprobe, outputs to UDP multicast
+- **DVR RECORDING**: Continuously records to timestamped .ts segments while source is live
+- **FAILOVER**: Source goes down → engine immediately loops recent DVR segments to the same UDP output — viewers see no interruption
+- **RECOVERY**: Source comes back → instantly switches back to live, resumes recording
+- **LOGO OVERLAY**: Per-stream PNG/JPG watermark, positioned by percentage (resolution-independent)
+- **HEALTH ENDPOINT**: `GET /api/health` — no auth, for external monitoring
+
+## Quick Install (fresh server)
+
+**See [INSTALL.md](INSTALL.md) for the full step-by-step guide.**
+
+Short version:
+```bash
+sudo apt install -y python3 python3-venv ffmpeg git
+sudo mkdir -p /opt/iptvmanager && sudo chown $USER /opt/iptvmanager
+cd /opt/iptvmanager
+git clone https://github.com/basilkewir/iptvmanager.git .
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env   # edit SECRET_KEY at minimum
+python run.py
+```
+
+Open `http://YOUR_IP:8000` — register your admin account on first visit.
+
+## Updating
+
+```bash
+bash /opt/iptvmanager/deploy.sh
+```
+
+Pulls latest code, migrates DB, restarts service. Safe — never touches your data.
+
+## Configuration
+
+Edit `.env`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SECRET_KEY` | — | **Required.** JWT signing key — generate with `python3 -c "import secrets; print(secrets.token_hex(32))"` |
+| `APP_PORT` | `8000` | Web UI port |
+| `HEALTH_CHECK_INTERVAL` | `5` | Seconds between source health checks |
+| `HEALTH_CHECK_FAILURES_BEFORE_DOWN` | `2` | Consecutive failures before DVR failover |
+| `DVR_RETENTION_HOURS` | `2` | How long to keep .ts segments |
+| `DVR_SEGMENT_DURATION` | `6` | Seconds per segment file |
+| `UDP_MULTICAST_BASE` | `udp://239.0.0.1` | Multicast group base address |
+| `UDP_MULTICAST_PORT_START` | `5000` | First stream uses 5001, second 5002, etc. |
+
+## Architecture
+
+```
+┌───────────────────────────────────────────────────┐
+│               Web UI (:8000)                       │
+│  Dashboard · Streams · DVR Browser · Settings     │
+│  Real-time status via WebSocket                   │
+└────────────────┬──────────────────────────────────┘
+                 │ REST API + JWT Auth
+┌────────────────▼──────────────────────────────────┐
+│              Stream Engine (engine.py)             │
+│  • ffprobe health check every 5 s (per stream)    │
+│  • FFmpeg live output  → UDP multicast            │
+│  • FFmpeg DVR recorder → timestamped .ts files    │
+│  • FFmpeg DVR playback → same UDP on failover     │
+│  • Logo overlay via libx264 (resolution-aware)    │
+│  • Disk space guard, segment cleanup              │
+└────────────────┬──────────────────────────────────┘
+                 │ UDP multicast 239.0.0.1:500X
+        IPTV receivers / Flussonic / VLC
+```
+
+## API Endpoints
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | No | Create account |
+| `POST` | `/api/auth/login` | No | Get JWT token |
+| `GET` | `/api/health` | No | Liveness check + stream summary |
+| `GET` | `/api/streams/` | Yes | List all streams with live stats |
+| `POST` | `/api/streams/` | Yes | Add a stream |
+| `PUT` | `/api/streams/{id}` | Yes | Update a stream |
+| `DELETE` | `/api/streams/{id}` | Yes | Remove a stream |
+| `POST` | `/api/streams/{id}/start` | Yes | Force-start a stream |
+| `POST` | `/api/streams/{id}/stop` | Yes | Stop a stream |
+| `POST` | `/api/streams/{id}/logo` | Yes | Upload or set logo URL |
+| `DELETE` | `/api/streams/{id}/logo` | Yes | Remove logo |
+| `GET` | `/api/streams/{id}/logs` | Yes | Event log for a stream |
+| `GET` | `/api/streams/dvr/summary` | Yes | DVR storage summary |
+| `GET` | `/api/streams/{id}/dvr` | Yes | DVR segments for one stream |
+| `WS` | `/ws/status` | No | Real-time status push |
+
+## License
+
+MIT
+
 
 ## What It Does
 
