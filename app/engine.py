@@ -425,11 +425,12 @@ class StreamProcess:
         )
         return [f for f in files if os.path.getmtime(f) >= cutoff]
 
-    def cleanup_old_segments(self):
+    def cleanup_old_segments(self, force: bool = False):
         # Don't delete segments while DVR playback is active —
         # FFmpeg holds open file handles to the playlist files and will crash
         # if any disappear. Cleanup resumes once we're back LIVE.
-        if self.mode == StreamStatus.DVR:
+        # Pass force=True on startup to always purge regardless of mode.
+        if self.mode == StreamStatus.DVR and not force:
             return
         cutoff = time.time() - (self.dvr_hours * 3600)
         removed = 0
@@ -465,6 +466,9 @@ class Engine:
             result = await db.execute(select(Stream).where(Stream.enabled == True))
             for s in result.scalars().all():
                 self._register(s)
+        # Purge any old segments accumulated while the service was down
+        for sp in self.streams.values():
+            sp.cleanup_old_segments(force=True)
         self._task = asyncio.create_task(self._loop())
         logger.info("Engine started")
 
