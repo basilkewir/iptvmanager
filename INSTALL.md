@@ -107,7 +107,7 @@ mkdir -p /opt/iptvmanager/data/logos
 ```bash
 cd /opt/iptvmanager
 source venv/bin/activate
-python run.py
+python3 run.py
 ```
 
 Open `http://YOUR_SERVER_IP:8000` in a browser.  
