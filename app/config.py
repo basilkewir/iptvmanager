@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     UDP_MULTICAST_BASE: str = "udp://239.0.0.1"
     UDP_MULTICAST_PORT_START: int = 5000
     UDP_TTL: int = 16
+    UDP_MULTICAST_INTERFACE: str = ""  # Set to server LAN IP e.g. 192.168.1.206
     UDP_BUFFER_SIZE: int = 1316
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"
