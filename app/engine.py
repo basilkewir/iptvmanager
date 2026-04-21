@@ -509,14 +509,12 @@ class Engine:
     # ── stream management ─────────────────────────────────────────────────
     def _make_udp_target(self, stream: Stream) -> str:
         port = settings.UDP_MULTICAST_PORT_START + stream.id
-        local = f"&localaddr={settings.UDP_MULTICAST_INTERFACE}" if settings.UDP_MULTICAST_INTERFACE else ""
         return (
             f"{settings.UDP_MULTICAST_BASE}:{port}"
             f"?pkt_size=1316"
             f"&buffer_size=4194304"
             f"&ttl={settings.UDP_TTL}"
             f"&overrun_nonfatal=1"
-            f"{local}"
         )
 
     def _register(self, s: Stream) -> StreamProcess:
