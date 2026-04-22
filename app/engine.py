@@ -63,6 +63,8 @@ class StreamProcess:
         # Cached video resolution — probed once on first live start, reused for DVR
         self._video_width: int = 1920
         self._video_height: int = 1080
+        # Cached source video codec — probed once, used to decide RTMP transcoding
+        self._source_video_codec: str = ""
         self.lock = asyncio.Lock()
         self.check_lock = asyncio.Lock()
         # RTMP exponential backoff — avoids hammering a dead RTMP server
@@ -120,6 +122,42 @@ class StreamProcess:
     # ── logo overlay helpers ───────────────────────────────────────────
     def _has_logo(self) -> bool:
         return bool(self.logo_path) and os.path.isfile(self.logo_path)
+
+    async def _probe_source_video_codec(self) -> str:
+        """Return the video codec name of the source (e.g. 'h264', 'hevc').
+        Cached after first probe. Falls back to 'h264' on error."""
+        if self._source_video_codec:
+            return self._source_video_codec
+        try:
+            cmd = [settings.FFPROBE_PATH, "-v", "error"]
+            if self.source_url.lower().startswith("rtsp://"):
+                cmd += ["-rtsp_transport", "tcp"]
+            cmd += [
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "csv=p=0",
+                "-i", self.source_url,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return "h264"
+            codec = stdout.decode().strip().lower().splitlines()[0] if stdout.strip() else "h264"
+            self._source_video_codec = codec
+            logger.info(f"[{self.name}] source video codec: {codec}")
+            return codec
+        except Exception as e:
+            logger.warning(f"[{self.name}] codec probe failed: {e}")
+            return "h264"
 
     async def _probe_video_size(self) -> tuple[int, int]:
         """
@@ -267,6 +305,7 @@ class StreamProcess:
 
     async def _start_rtmp_relay(self, source_url: str):
         """Push stream to RTMP server as a separate resilient process.
+        Automatically transcodes H.265/HEVC → H.264 since RTMP only supports H.264.
         Uses exponential backoff: 10s → 20s → 40s → ... → max 300s between retries.
         """
         if not self.rtmp_target:
@@ -277,6 +316,11 @@ class StreamProcess:
             logger.debug(f"[{self.name}] RTMP backoff: {wait_secs}s remaining before retry")
             return
         await self._kill_rtmp_relay()
+
+        # Probe codec to decide if transcoding is needed for RTMP
+        codec = await self._probe_source_video_codec()
+        needs_transcode = codec in ("hevc", "h265", "vp9", "av1")
+
         cmd = [settings.FFMPEG_PATH]
         if source_url.lower().startswith("rtsp://"):
             cmd += ["-rtsp_transport", "tcp"]
@@ -288,8 +332,32 @@ class StreamProcess:
             "-analyzeduration", "2000000",
             "-probesize", "2000000",
             "-i", source_url,
-            "-c", "copy",
-            "-map", "0",
+        ]
+
+        if needs_transcode:
+            # Transcode H.265/HEVC → H.264 for RTMP compatibility
+            logger.info(f"[{self.name}] RTMP: transcoding {codec} → H.264 for RTMP compatibility")
+            cmd += [
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-tune", "zerolatency",
+                "-profile:v", "main",
+                "-level", "4.1",
+                "-b:v", "4000k",
+                "-maxrate", "4500k",
+                "-bufsize", "8000k",
+                "-g", "50",
+                "-keyint_min", "25",
+                "-sc_threshold", "0",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-map", "0:v:0",
+                "-map", "0:a:0",
+            ]
+        else:
+            cmd += ["-c", "copy", "-map", "0"]
+
+        cmd += [
             "-f", "flv",
             "-flvflags", "no_duration_filesize",
             self.rtmp_target,
