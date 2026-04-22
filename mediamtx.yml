@@ -7,6 +7,10 @@
 logLevel: info
 logDestinations: [stdout]
 
+# REST API — used by the IPTV Manager engine to register stream paths
+api: yes
+apiAddress: :9997
+
 # RTMP server (accepts our engine's push on port 1935)
 rtmp: yes
 rtmpAddress: :1935
@@ -15,7 +19,6 @@ rtmpAddress: :1935
 rtsp: yes
 rtspAddress: :8554
 rtspsAddress: :8322
-# Increase buffer for unstable sources — prevents Flussonic from seeing dropouts
 rtspDisable: no
 
 # HLS server (browsers, Flussonic)
@@ -36,39 +39,13 @@ webrtc: yes
 webrtcAddress: :8889
 
 ###############################################################################
-# Per-stream paths — one entry per IPTV stream
-# Engine pushes to rtmp://127.0.0.1:1935/live/<key>
-# MediaMTX re-publishes as RTSP, HLS, SRT, WebRTC automatically
-# runOnReady adds UDP multicast output
+# Paths
+# Per-stream paths are registered dynamically via the MediaMTX API by the
+# IPTV Manager engine when each stream is added. The catch-all below ensures
+# any stream works even before API registration completes.
 ###############################################################################
 paths:
 
-  # ── Stream 1 (rtmp_key = test) ──────────────────────────────────────────
-  live/test:
-    source: publisher
-    # Keep RTSP session alive — don't drop readers on brief publisher reconnects
-    sourceOnDemand: no
-    # When stream becomes live, start FFmpeg UDP multicast output
-    runOnReady: >
-      ffmpeg -hide_banner -loglevel error
-      -i rtsp://localhost:8554/live/test
-      -c copy -map 0
-      -f mpegts
-      "udp://239.0.0.1:5001?pkt_size=1316&ttl=16&localaddr=192.168.1.206"
-    runOnReadyRestart: yes
-
-  # ── Stream 2 (rtmp_key = test2) ─────────────────────────────────────────
-  live/test2:
-    source: publisher
-    sourceOnDemand: no
-    runOnReady: >
-      ffmpeg -hide_banner -loglevel error
-      -i rtsp://localhost:8554/live/test2
-      -c copy -map 0
-      -f mpegts
-      "udp://239.0.0.1:5002?pkt_size=1316&ttl=16&localaddr=192.168.1.206"
-    runOnReadyRestart: yes
-
-  # ── Catch-all for any other streams ─────────────────────────────────────
+  # ── Catch-all — accepts any publisher on live/<key> ─────────────────────
   "~^live/(.+)$":
     source: publisher

@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     # e.g. UDP_MULTICAST_INTERFACE=192.168.1.206
     UDP_MULTICAST_INTERFACE: str = ""
     RTMP_SERVER_URL: str = "rtmp://127.0.0.1:1935/live"
+    # MediaMTX relay — RTSP / SRT / WebRTC output ports
+    MEDIAMTX_API_URL: str = "http://127.0.0.1:9997"
+    MEDIAMTX_RTSP_PORT: int = 8554
+    MEDIAMTX_SRT_PORT: int = 8890
     HLS_OUTPUT_DIR: str = "./data/hls"
     FFMPEG_PATH: str = "ffmpeg"
     FFPROBE_PATH: str = "ffprobe"

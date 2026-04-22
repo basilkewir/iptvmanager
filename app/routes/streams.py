@@ -31,6 +31,25 @@ def _rtmp_for(s: Stream) -> str:
         return f"{settings.RTMP_SERVER_URL}/{s.rtmp_key}"
     return None
 
+def _mediamtx_host() -> str:
+    """Extract host from RTMP_SERVER_URL so RTSP/SRT use the same server address."""
+    import re
+    from app.config import settings
+    m = re.match(r'[a-z]+://([^:/]+)', settings.RTMP_SERVER_URL)
+    return m.group(1) if m else "127.0.0.1"
+
+def _rtsp_for(s: Stream) -> str:
+    from app.config import settings
+    if not s.rtmp_key:
+        return None
+    return f"rtsp://{_mediamtx_host()}:{settings.MEDIAMTX_RTSP_PORT}/live/{s.rtmp_key}"
+
+def _srt_for(s: Stream) -> str:
+    from app.config import settings
+    if not s.rtmp_key:
+        return None
+    return f"srt://{_mediamtx_host()}:{settings.MEDIAMTX_SRT_PORT}?streamid=read:live/{s.rtmp_key}&latency=200"
+
 def _stream_out(s: Stream, dvr_segs: int = 0, dvr_size_mb: float = 0.0,
                 recorder_running: bool = False) -> StreamOut:
     return StreamOut(
@@ -40,6 +59,8 @@ def _stream_out(s: Stream, dvr_segs: int = 0, dvr_size_mb: float = 0.0,
         udp_target=_udp_for(s),
         hls_url=_hls_for(s),
         rtmp_url=_rtmp_for(s),
+        rtsp_url=_rtsp_for(s),
+        srt_url=_srt_for(s),
         last_online=s.last_online.isoformat() if s.last_online else None,
         consecutive_failures=s.consecutive_failures or 0,
         logo_path=s.logo_path,

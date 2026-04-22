@@ -695,8 +695,12 @@ class Engine:
         await self._kill_orphaned_ffmpeg()
         async with async_session() as db:
             result = await db.execute(select(Stream).where(Stream.enabled == True))
-            for s in result.scalars().all():
+            streams = result.scalars().all()
+            for s in streams:
                 self._register(s)
+        # Register all existing streams in MediaMTX (best-effort, non-blocking)
+        for sp in self.streams.values():
+            await self._mediamtx_add_path(sp.rtmp_key)
         # Purge any old segments accumulated while the service was down
         for sp in self.streams.values():
             sp.cleanup_old_segments(force=True)
@@ -740,6 +744,51 @@ class Engine:
         for sp in self.streams.values():
             await sp.stop()
         logger.info("Engine stopped")
+
+    # ── MediaMTX path management ──────────────────────────────────────────
+    async def _mediamtx_add_path(self, rtmp_key: str):
+        """Register a stream path in MediaMTX via its API.
+
+        This makes the path appear in MediaMTX immediately (before the first
+        RTMP push) so that RTSP/SRT clients can connect right away. The path
+        config enables publisher mode so it accepts our RTMP push.
+        Errors are logged but never raised — MediaMTX's catch-all handles any
+        stream even if this call fails.
+        """
+        if not rtmp_key:
+            return
+        try:
+            import httpx
+            url = f"{settings.MEDIAMTX_API_URL}/v3/config/paths/add/live/{rtmp_key}"
+            payload = {"source": "publisher"}
+            async with httpx.AsyncClient(timeout=3) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code in (200, 201):
+                    logger.info(f"MediaMTX: registered path live/{rtmp_key}")
+                elif resp.status_code == 400:
+                    # Path already exists — patch it instead
+                    patch_url = f"{settings.MEDIAMTX_API_URL}/v3/config/paths/patch/live/{rtmp_key}"
+                    presp = await client.patch(patch_url, json=payload)
+                    if presp.status_code in (200, 201):
+                        logger.info(f"MediaMTX: updated path live/{rtmp_key}")
+                else:
+                    logger.warning(f"MediaMTX add path live/{rtmp_key}: HTTP {resp.status_code} — {resp.text[:200]}")
+        except Exception as e:
+            logger.debug(f"MediaMTX API not available (live/{rtmp_key}): {e}")
+
+    async def _mediamtx_remove_path(self, rtmp_key: str):
+        """Remove a stream path from MediaMTX when the stream is deleted."""
+        if not rtmp_key:
+            return
+        try:
+            import httpx
+            url = f"{settings.MEDIAMTX_API_URL}/v3/config/paths/remove/live/{rtmp_key}"
+            async with httpx.AsyncClient(timeout=3) as client:
+                resp = await client.delete(url)
+                if resp.status_code in (200, 204):
+                    logger.info(f"MediaMTX: removed path live/{rtmp_key}")
+        except Exception as e:
+            logger.debug(f"MediaMTX API not available (remove live/{rtmp_key}): {e}")
 
     # ── stream management ─────────────────────────────────────────────────
     def _make_udp_target(self, stream: Stream) -> str:
@@ -799,11 +848,13 @@ class Engine:
 
     async def add_stream(self, s: Stream):
         sp = self._register(s)
+        await self._mediamtx_add_path(s.rtmp_key)
         await self._check_and_act(sp)
 
     async def remove_stream(self, stream_id: int):
         sp = self.streams.pop(stream_id, None)
         if sp:
+            await self._mediamtx_remove_path(sp.rtmp_key)
             await sp.stop()
 
     async def stop_stream(self, stream_id: int):

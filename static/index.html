@@ -476,6 +476,20 @@ function renderStreams(){
             ${s.rtmp_url ? `<button class="btn btn-sm btn-outline" style="padding:2px 7px;font-size:.72rem" onclick="copyText('${esc(s.rtmp_url)}')">📋</button>` : ''}
           </span>
         </div>
+        <div class="stream-detail">
+          <span class="label">📷 RTSP:</span>
+          <span class="value" style="display:flex;align-items:center;gap:6px">
+            <code style="font-size:.78rem;background:rgba(168,85,247,.1);padding:2px 6px;border-radius:4px;color:#a855f7">rtsp://${location.hostname}:8554/live/${esc(s.rtmp_key)}</code>
+            <button class="btn btn-sm btn-outline" style="padding:2px 7px;font-size:.72rem" onclick="copyText('rtsp://${location.hostname}:8554/live/${esc(s.rtmp_key)}')">📋</button>
+          </span>
+        </div>
+        <div class="stream-detail">
+          <span class="label">🔀 SRT:</span>
+          <span class="value" style="display:flex;align-items:center;gap:6px">
+            <code style="font-size:.78rem;background:rgba(249,115,22,.1);padding:2px 6px;border-radius:4px;color:#f97316">srt://${location.hostname}:8890?streamid=read:live/${esc(s.rtmp_key)}&amp;latency=200</code>
+            <button class="btn btn-sm btn-outline" style="padding:2px 7px;font-size:.72rem" onclick="copyText('srt://${location.hostname}:8890?streamid=read:live/${esc(s.rtmp_key)}&latency=200')">📋</button>
+          </span>
+        </div>
         <div class="stream-detail"><span class="label">Key:</span> <span class="value">${esc(s.rtmp_key)}</span></div>
         <div class="stream-detail"><span class="label">DVR:</span> <span class="value">${s.dvr_hours}h · ${s.dvr_segments||0} segs · ${s.dvr_size_mb||0} MB</span></div>
         <div class="stream-detail"><span class="label">Logo:</span> <span class="value">${s.logo_path ? `🖼️ x:${s.logo_x}% y:${s.logo_y}%` : '—'}</span></div>
