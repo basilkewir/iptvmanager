@@ -1,0 +1,72 @@
+###############################################################################
+# MediaMTX — IPTV Manager relay server
+# Accepts RTMP push from engine, re-distributes as RTMP, RTSP, HLS, SRT, UDP
+###############################################################################
+
+# Logging
+logLevel: info
+logDestinations: [stdout]
+
+# RTMP server (accepts our engine's push on port 1935)
+rtmp: yes
+rtmpAddress: :1935
+
+# RTSP server (VLC, set-top boxes)
+rtsp: yes
+rtspAddress: :8554
+rtspsAddress: :8322
+
+# HLS server (browsers, Flussonic)
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+
+# SRT server
+srt: yes
+srtAddress: :8890
+
+# WebRTC
+webrtc: yes
+webrtcAddress: :8889
+
+###############################################################################
+# Per-stream paths — one entry per IPTV stream
+# Engine pushes to rtmp://127.0.0.1:1935/live/<key>
+# MediaMTX then re-publishes to UDP multicast automatically via runOnReady hook
+###############################################################################
+paths:
+
+  # ── Stream 1 (rtmp_key = test) ──────────────────────────────────────────
+  live/test:
+    # Accept push from our engine
+    source: publisher
+    # When stream becomes live, start FFmpeg UDP multicast output
+    runOnReady: >
+      ffmpeg
+      -i rtsp://localhost:8554/live/test
+      -c copy -map 0
+      -f mpegts
+      "udp://239.0.0.1:5001?pkt_size=1316&ttl=16&localaddr=192.168.1.206"
+    runOnReadyRestart: yes
+    # Stop UDP output when stream goes offline
+    runOnNotReady: ""
+
+  # ── Stream 2 (rtmp_key = test2) ─────────────────────────────────────────
+  live/test2:
+    source: publisher
+    runOnReady: >
+      ffmpeg
+      -i rtsp://localhost:8554/live/test2
+      -c copy -map 0
+      -f mpegts
+      "udp://239.0.0.1:5002?pkt_size=1316&ttl=16&localaddr=192.168.1.206"
+    runOnReadyRestart: yes
+    runOnNotReady: ""
+
+  # ── Catch-all for any other streams ─────────────────────────────────────
+  "~^live/(.+)$":
+    source: publisher
