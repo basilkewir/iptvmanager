@@ -247,15 +247,30 @@ class StreamProcess:
         ]
         return extra_in, codec
 
-    # ── LIVE: source → UDP + HLS (tee) + RTMP (separate process) ──────────
+    # ── LIVE: source → UDP + HLS + RTMP (single unified tee process) ─────
     async def start_live_output(self):
-        """Push live source to UDP multicast + HLS + RTMP (separate relay)."""
+        """Push live source to UDP multicast + HLS + RTMP via a single FFmpeg tee.
+
+        All three outputs are produced by one process so the logo overlay (when
+        configured) is applied exactly once and appears identically on every
+        protocol output — UDP, HLS, RTMP → RTSP/SRT/WebRTC via MediaMTX.
+
+        Codec handling:
+          • Logo active   → re-encode to H.264 (libx264 veryfast) — works for RTMP
+          • H.265 source  → transcode to H.264 for RTMP/STB compatibility
+          • H.264 source  → stream copy — zero CPU overhead
+        """
         async with self.lock:
             await self._kill_output()
-            await self._kill_rtmp_relay()
+            await self._kill_rtmp_relay()   # safety — kills any leftover relay
 
             logger.info(f"[{self.name}] Starting LIVE → {self.udp_target}")
             has_logo = self._has_logo()
+
+            # Always probe codec upfront so we know if H.265→H.264 transcode needed
+            codec = await self._probe_source_video_codec()
+            needs_transcode = codec in ("hevc", "h265", "vp9", "av1")
+
             if has_logo:
                 vid_w, vid_h = await self._probe_video_size()
 
@@ -275,16 +290,30 @@ class StreamProcess:
             if has_logo:
                 extra_in, codec_args = self._build_logo_filter(vid_w, vid_h)
                 cmd += extra_in + codec_args
+            elif needs_transcode:
+                logger.info(f"[{self.name}] Transcoding {codec} → H.264 for RTMP/STB compatibility")
+                cmd += [
+                    "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+                    "-profile:v", "main", "-level", "4.1",
+                    "-b:v", "4000k", "-maxrate", "4500k", "-bufsize", "8000k",
+                    "-g", "50", "-keyint_min", "25", "-sc_threshold", "0",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-map", "0:v:0", "-map", "0:a:0",
+                ]
             else:
                 cmd += ["-c", "copy", "-map", "0"]
 
-            # Tee muxer: UDP multicast + HLS simultaneously
+            # Build tee: UDP + HLS + RTMP all in one process
             tee_outputs = [
                 f"[f=mpegts:mpegts_flags=+resend_headers:pcr_period=20]{self.udp_target}",
                 (f"[f=hls:hls_time=4:hls_list_size=6"
                  f":hls_flags=delete_segments+append_list+temp_file"
                  f":hls_segment_filename={self.hls_dir}/seg%05d.ts]{self.hls_target}"),
             ]
+            if self.rtmp_target:
+                tee_outputs.append(
+                    f"[f=flv:flvflags=no_duration_filesize]{self.rtmp_target}"
+                )
             cmd += ["-f", "tee", "|".join(tee_outputs)]
 
             logger.info(f"[{self.name}] LIVE CMD: {' '.join(cmd)}")
@@ -295,97 +324,9 @@ class StreamProcess:
             )
             asyncio.create_task(self._log_ffmpeg(self.output_process, "live-out"))
 
-            # Start RTMP relay reading from our own HLS output (which already has
-            # the logo burned in). This guarantees RTMP/RTSP gets the same picture
-            # as HLS and UDP — logo, correct codec, everything identical.
-            if self.rtmp_target:
-                await self._start_rtmp_relay_from_hls()
-
             self.mode = StreamStatus.LIVE
             self.consecutive_failures = 0
             self.last_online = datetime.now(timezone.utc)
-
-    async def _start_rtmp_relay(self, source_url: str, force_copy: bool = False):
-        """Push stream to RTMP server as a separate resilient process.
-
-        When force_copy=True, skips codec probe and uses stream copy (safe when
-        the input is already known to be H.264, e.g. reading from our own HLS
-        output that had a logo filter applied).
-        Automatically transcodes H.265/HEVC → H.264 since RTMP only supports H.264.
-        Uses exponential backoff: 10s → 20s → 40s → ... → max 300s between retries.
-        """
-        if not self.rtmp_target:
-            return
-        now = time.time()
-        if now < self._rtmp_next_retry:
-            wait_secs = int(self._rtmp_next_retry - now)
-            logger.debug(f"[{self.name}] RTMP backoff: {wait_secs}s remaining before retry")
-            return
-        await self._kill_rtmp_relay()
-
-        # Probe codec to decide if transcoding is needed for RTMP.
-        # force_copy=True means input is already H.264 (e.g. our logo-filtered HLS output).
-        if force_copy:
-            needs_transcode = False
-        else:
-            codec = await self._probe_source_video_codec()
-            needs_transcode = codec in ("hevc", "h265", "vp9", "av1")
-
-        cmd = [settings.FFMPEG_PATH]
-        if source_url.lower().startswith("rtsp://"):
-            cmd += ["-rtsp_transport", "tcp"]
-        else:
-            # For HLS/HTTP sources: auto-reconnect so the relay NEVER dies on brief hiccups
-            # This keeps MediaMTX's RTSP/HLS output stable (no dropout for Flussonic)
-            cmd += [
-                "-reconnect", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_at_eof", "1",
-                "-reconnect_on_network_error", "1",
-                "-reconnect_delay_max", "5",
-            ]
-        cmd += [
-            "-fflags", "+genpts+discardcorrupt",
-            "-analyzeduration", "2000000",
-            "-probesize", "2000000",
-            "-i", source_url,
-        ]
-
-        if needs_transcode:
-            # Transcode H.265/HEVC → H.264 for RTMP compatibility
-            logger.info(f"[{self.name}] RTMP: transcoding {codec} → H.264 for RTMP compatibility")
-            cmd += [
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-tune", "zerolatency",
-                "-profile:v", "main",
-                "-level", "4.1",
-                "-b:v", "4000k",
-                "-maxrate", "4500k",
-                "-bufsize", "8000k",
-                "-g", "50",
-                "-keyint_min", "25",
-                "-sc_threshold", "0",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-map", "0:v:0",
-                "-map", "0:a:0",
-            ]
-        else:
-            cmd += ["-c", "copy", "-map", "0"]
-
-        cmd += [
-            "-f", "flv",
-            "-flvflags", "no_duration_filesize",
-            self.rtmp_target,
-        ]
-        logger.info(f"[{self.name}] RTMP CMD: {' '.join(cmd)}")
-        self.rtmp_process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        asyncio.create_task(self._log_ffmpeg_rtmp(self.rtmp_process, "rtmp-relay"))
 
     # ── DVR RECORDER: source → .ts segments (only while live) ────────────
     async def start_dvr_recording(self):
@@ -486,16 +427,31 @@ class StreamProcess:
                     self._video_width, self._video_height
                 )
                 cmd += extra_in + codec_args
+            elif self._source_video_codec in ("hevc", "h265", "vp9", "av1"):
+                # DVR segments carry the source codec — transcode for RTMP compat
+                logger.info(f"[{self.name}] DVR: transcoding {self._source_video_codec} → H.264")
+                cmd += [
+                    "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+                    "-profile:v", "main", "-level", "4.1",
+                    "-b:v", "4000k", "-maxrate", "4500k", "-bufsize", "8000k",
+                    "-g", "50", "-keyint_min", "25", "-sc_threshold", "0",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-map", "0:v:0", "-map", "0:a:0",
+                ]
             else:
                 cmd += ["-c", "copy", "-map", "0"]
 
-            # Tee muxer: UDP + HLS
+            # Tee muxer: UDP + HLS + RTMP — same as live, logo on all outputs
             tee_outputs = [
                 f"[f=mpegts:mpegts_flags=+resend_headers:pcr_period=20]{self.udp_target}",
                 (f"[f=hls:hls_time=4:hls_list_size=6"
                  f":hls_flags=delete_segments+append_list+temp_file"
                  f":hls_segment_filename={self.hls_dir}/seg%05d.ts]{self.hls_target}"),
             ]
+            if self.rtmp_target:
+                tee_outputs.append(
+                    f"[f=flv:flvflags=no_duration_filesize]{self.rtmp_target}"
+                )
             cmd += ["-f", "tee", "|".join(tee_outputs)]
 
             logger.info(f"[{self.name}] DVR CMD: {' '.join(cmd)}")
@@ -506,78 +462,8 @@ class StreamProcess:
             )
             asyncio.create_task(self._log_ffmpeg(self.output_process, "dvr-play"))
 
-            # Relay DVR to RTMP by reading from HLS — same picture as UDP/HLS,
-            # logo included, correct codec.
-            if self.rtmp_target:
-                await self._start_rtmp_relay_from_hls()
-
             self.mode = StreamStatus.DVR
             self.dvr_started_at = datetime.now(timezone.utc)
-
-    async def _wait_hls_ready(self, timeout: float = 10.0):
-        """Poll until the HLS playlist file exists and has content (up to timeout seconds).
-        This ensures the RTMP relay doesn't try to open the HLS stream before the first
-        segments have been written by output_process.
-        """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                if os.path.exists(self.hls_target) and os.path.getsize(self.hls_target) > 0:
-                    logger.debug(f"[{self.name}] HLS ready at {self.hls_target}")
-                    return True
-            except OSError:
-                pass
-            await asyncio.sleep(0.5)
-        logger.warning(f"[{self.name}] HLS not ready after {timeout:.0f}s — starting RTMP relay anyway")
-        return False
-
-    async def _start_rtmp_relay_from_hls(self):
-        """Start RTMP relay by reading from our own HLS output.
-
-        Because the HLS stream is produced by output_process (which already applies
-        the logo overlay and transcodes H.265 if needed), the RTMP/RTSP output will
-        always carry the logo and be in the correct codec for RTMP.
-
-        - Logo active → HLS is H.264 → relay copies H.264 (force_copy=True)
-        - No logo, H.264 source → HLS is H.264 → relay copies (force_copy=False, detected H.264)
-        - No logo, H.265 source → HLS is H.265 → relay transcodes H.265→H.264 (force_copy=False)
-        """
-        if not self.rtmp_target:
-            return
-        await self._wait_hls_ready(timeout=10.0)
-        hls_url = f"http://127.0.0.1:{settings.APP_PORT}/hls/{self.stream_id}/index.m3u8"
-        # If logo is active, output_process already encoded to H.264 — no need to re-probe
-        force_copy = self._has_logo()
-        await self._start_rtmp_relay(hls_url, force_copy=force_copy)
-
-    async def _start_rtmp_relay_from_concat(self, concat_path: str):
-        """Push DVR loop to RTMP as a separate process. Uses same backoff as live relay."""
-        if not self.rtmp_target:
-            return
-        now = time.time()
-        if now < self._rtmp_next_retry:
-            return
-        await self._kill_rtmp_relay()
-        cmd = [
-            settings.FFMPEG_PATH,
-            "-re",
-            "-fflags", "+genpts+igndts",
-            "-stream_loop", "-1",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_path,
-            "-c", "copy",
-            "-map", "0",
-            "-f", "flv",
-            "-flvflags", "no_duration_filesize",
-            self.rtmp_target,
-        ]
-        logger.info(f"[{self.name}] DVR-RTMP CMD: {' '.join(cmd)}")
-        self.rtmp_process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        asyncio.create_task(self._log_ffmpeg_rtmp(self.rtmp_process, "dvr-rtmp"))
 
     # ── stop all ─────────────────────────────────────────────────────────
     async def stop(self):
@@ -648,52 +534,6 @@ class StreamProcess:
             rc = proc.returncode
             if rc is not None and rc != 0:
                 logger.error(f"[{self.name}] ffmpeg({label}) exited with code {rc}")
-
-    async def _log_ffmpeg_rtmp(self, proc: asyncio.subprocess.Process, label: str):
-        """Like _log_ffmpeg but applies exponential backoff on connection failures."""
-        connection_refused = False
-        try:
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                msg = line.decode(errors="ignore").strip()
-                if not msg:
-                    continue
-                low = msg.lower()
-                if "connection refused" in low or "network is unreachable" in low:
-                    connection_refused = True
-                    logger.warning(f"[{self.name}] ffmpeg({label}): {msg}")
-                elif any(k in low for k in ("error", "invalid", "failed", "no such", "unable")):
-                    logger.error(f"[{self.name}] ffmpeg({label}): {msg}")
-                elif any(k in low for k in ("warning", "deprecated")):
-                    logger.warning(f"[{self.name}] ffmpeg({label}): {msg}")
-                else:
-                    logger.debug(f"[{self.name}] ffmpeg({label}): {msg}")
-        except Exception:
-            pass
-        finally:
-            rc = proc.returncode
-            if rc is not None and rc != 0:
-                if connection_refused:
-                    # Exponential backoff: 10 → 20 → 40 → 80 → max 300 seconds
-                    self._rtmp_fail_count += 1
-                    delay = min(10 * (2 ** (self._rtmp_fail_count - 1)), 300)
-                    self._rtmp_next_retry = time.time() + delay
-                    logger.warning(
-                        f"[{self.name}] RTMP server not reachable at {self.rtmp_target} "
-                        f"(attempt {self._rtmp_fail_count}) — retrying in {delay}s. "
-                        f"Make sure an RTMP server is running on port 1935."
-                    )
-                else:
-                    # Non-connection error — shorter retry
-                    self._rtmp_fail_count = max(self._rtmp_fail_count, 1)
-                    self._rtmp_next_retry = time.time() + 10
-                    logger.error(f"[{self.name}] ffmpeg({label}) exited with code {rc}")
-            else:
-                # Successful exit — reset backoff
-                self._rtmp_fail_count = 0
-                self._rtmp_next_retry = 0.0
 
     def _get_recent_segments(self) -> list[str]:
         cutoff = time.time() - (self.dvr_hours * 3600)
@@ -969,14 +809,9 @@ class Engine:
                 else:
                     # Restart dead sub-processes individually without full restart
                     if sp.output_process and sp.output_process.returncode is not None:
-                        logger.warning(f"[{sp.name}] Live output (UDP/HLS) died — restarting")
+                        logger.warning(f"[{sp.name}] Live output (UDP/HLS/RTMP) died — restarting")
                         await sp.start_live_output()
                     else:
-                        # Check RTMP relay separately — restart without touching UDP/HLS
-                        if sp.rtmp_target and (sp.rtmp_process is None or
-                                               sp.rtmp_process.returncode is not None):
-                            logger.warning(f"[{sp.name}] RTMP relay died — restarting relay only")
-                            await sp._start_rtmp_relay(sp.source_url)
                         if sp.recorder_process and sp.recorder_process.returncode is not None:
                             logger.warning(f"[{sp.name}] DVR recorder died — restarting")
                             await sp.start_dvr_recording()
