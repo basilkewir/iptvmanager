@@ -669,33 +669,46 @@ class Engine:
     # ── stream management ─────────────────────────────────────────────────
     def _make_udp_target(self, stream: Stream) -> str:
         """Build the FFmpeg UDP output URL.
-        
-        Supports both multicast (239.x.x.x) and unicast targets.
-        When UDP_MULTICAST_INTERFACE is set, binds to that local IP so
-        FFmpeg sends packets out the correct NIC (same as Flussonic localaddr).
+
+        Supports both multicast (239.x.x.x / 224.x.x.x) and unicast targets.
+        When UDP_MULTICAST_INTERFACE is set, binds to that local NIC so packets
+        are sent out the correct interface (important for multi-homed servers).
+
+        Multicast example:  udp://239.0.0.1:5001?ttl=16&pkt_size=1316
+        Unicast example:    udp://192.168.1.10:5001?pkt_size=1316
         """
         port = settings.UDP_MULTICAST_PORT_START + stream.id
-        base = settings.UDP_MULTICAST_BASE  # e.g. udp://239.0.0.1 or udp://192.168.1.123
+        base = settings.UDP_MULTICAST_BASE  # e.g. "udp://239.0.0.1"
+        host = base.replace("udp://", "").split(":")[0]
+
         is_multicast = any(
-            base.replace("udp://", "").startswith(prefix)
+            host.startswith(prefix)
             for prefix in ("224.", "225.", "226.", "227.", "228.", "229.",
                            "230.", "231.", "232.", "233.", "234.", "235.",
                            "236.", "237.", "238.", "239.")
         )
+
+        # Valid FFmpeg UDP output parameters
         params = [
-            f"pkt_size=1316",
-            f"buffer_size=4194304",
-            f"overrun_nonfatal=1",
-            f"fifo_size=50000",
-            f"bitrate=2000000"
+            "pkt_size=1316",       # MPEG-TS packet size (7 × 188 bytes)
+            "buffer_size=4194304", # 4 MB send buffer
+            "overrun_nonfatal=1",  # Don't crash on buffer overrun
+            "fifo_size=50000",     # Async FIFO for smooth output
         ]
+
         if is_multicast:
             params.append(f"ttl={settings.UDP_TTL}")
-            
+
         if settings.UDP_MULTICAST_INTERFACE:
+            # localaddr binds FFmpeg to a specific NIC for multicast/unicast
             params.append(f"localaddr={settings.UDP_MULTICAST_INTERFACE}")
-            
-        return f"{base}:{port}?" + "&".join(params)
+
+        url = f"{base}:{port}?" + "&".join(params)
+        logger.info(
+            f"UDP target for stream [{stream.name}]: {url} "
+            f"({'multicast' if is_multicast else 'unicast'})"
+        )
+        return url
 
     def _register(self, s: Stream) -> StreamProcess:
         udp = self._make_udp_target(s)

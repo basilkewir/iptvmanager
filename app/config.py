@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     HEALTH_CHECK_FAILURES_BEFORE_DOWN: int = 2  # 2×5s = 10s before DVR failover
     DVR_SEGMENT_DURATION: int = 6  # seconds per .ts segment
     DVR_RETENTION_HOURS: int = 2   # keep 2 hours of DVR
-    UDP_MULTICAST_BASE: str = "udp://192.168.1.244"
+    UDP_MULTICAST_BASE: str = "udp://239.0.0.1"
     UDP_MULTICAST_PORT_START: int = 5000
     UDP_TTL: int = 16
     UDP_BUFFER_SIZE: int = 1316

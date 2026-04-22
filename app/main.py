@@ -56,6 +56,7 @@ async def test_outputs(stream_id: int):
         "stream_id": stream_id,
         "stream_name": sp.name,
         "udp_target": sp.udp_target,
+        "udp_receive": f"udp://@{sp.udp_target.replace('udp://', '').split('?')[0]}",
         "rtmp_target": sp.rtmp_target,
         "hls_url": f"http://localhost:{settings.APP_PORT}/hls/{stream_id}/index.m3u8",
         "flussonic_ts_url": f"ts+http://localhost:{settings.APP_PORT}/ts/{stream_id}",
