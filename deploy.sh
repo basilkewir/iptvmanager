@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # IPTV Manager Update Script
 # Run on server: bash /opt/iptvmanager/deploy.sh
 # Pulls latest code, updates deps, migrates DB columns, restarts service.
@@ -35,6 +35,7 @@ fi
 # 1. Pull latest code
 echo ""
 echo "[1/4] Pulling latest code from GitHub..."
+git config --global --add safe.directory "$APP_DIR" 2>/dev/null || true
 git fetch origin main
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
