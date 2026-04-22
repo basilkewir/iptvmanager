@@ -295,16 +295,22 @@ class StreamProcess:
             )
             asyncio.create_task(self._log_ffmpeg(self.output_process, "live-out"))
 
-            # Start RTMP relay as an independent process (reconnects on its own)
+            # Start RTMP relay reading from our own HLS output (which already has
+            # the logo burned in). This guarantees RTMP/RTSP gets the same picture
+            # as HLS and UDP — logo, correct codec, everything identical.
             if self.rtmp_target:
-                await self._start_rtmp_relay(self.source_url)
+                await self._start_rtmp_relay_from_hls()
 
             self.mode = StreamStatus.LIVE
             self.consecutive_failures = 0
             self.last_online = datetime.now(timezone.utc)
 
-    async def _start_rtmp_relay(self, source_url: str):
+    async def _start_rtmp_relay(self, source_url: str, force_copy: bool = False):
         """Push stream to RTMP server as a separate resilient process.
+
+        When force_copy=True, skips codec probe and uses stream copy (safe when
+        the input is already known to be H.264, e.g. reading from our own HLS
+        output that had a logo filter applied).
         Automatically transcodes H.265/HEVC → H.264 since RTMP only supports H.264.
         Uses exponential backoff: 10s → 20s → 40s → ... → max 300s between retries.
         """
@@ -317,9 +323,13 @@ class StreamProcess:
             return
         await self._kill_rtmp_relay()
 
-        # Probe codec to decide if transcoding is needed for RTMP
-        codec = await self._probe_source_video_codec()
-        needs_transcode = codec in ("hevc", "h265", "vp9", "av1")
+        # Probe codec to decide if transcoding is needed for RTMP.
+        # force_copy=True means input is already H.264 (e.g. our logo-filtered HLS output).
+        if force_copy:
+            needs_transcode = False
+        else:
+            codec = await self._probe_source_video_codec()
+            needs_transcode = codec in ("hevc", "h265", "vp9", "av1")
 
         cmd = [settings.FFMPEG_PATH]
         if source_url.lower().startswith("rtsp://"):
@@ -496,12 +506,49 @@ class StreamProcess:
             )
             asyncio.create_task(self._log_ffmpeg(self.output_process, "dvr-play"))
 
-            # Also relay DVR to RTMP using concat source
+            # Relay DVR to RTMP by reading from HLS — same picture as UDP/HLS,
+            # logo included, correct codec.
             if self.rtmp_target:
-                await self._start_rtmp_relay_from_concat(concat_path)
+                await self._start_rtmp_relay_from_hls()
 
             self.mode = StreamStatus.DVR
             self.dvr_started_at = datetime.now(timezone.utc)
+
+    async def _wait_hls_ready(self, timeout: float = 10.0):
+        """Poll until the HLS playlist file exists and has content (up to timeout seconds).
+        This ensures the RTMP relay doesn't try to open the HLS stream before the first
+        segments have been written by output_process.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if os.path.exists(self.hls_target) and os.path.getsize(self.hls_target) > 0:
+                    logger.debug(f"[{self.name}] HLS ready at {self.hls_target}")
+                    return True
+            except OSError:
+                pass
+            await asyncio.sleep(0.5)
+        logger.warning(f"[{self.name}] HLS not ready after {timeout:.0f}s — starting RTMP relay anyway")
+        return False
+
+    async def _start_rtmp_relay_from_hls(self):
+        """Start RTMP relay by reading from our own HLS output.
+
+        Because the HLS stream is produced by output_process (which already applies
+        the logo overlay and transcodes H.265 if needed), the RTMP/RTSP output will
+        always carry the logo and be in the correct codec for RTMP.
+
+        - Logo active → HLS is H.264 → relay copies H.264 (force_copy=True)
+        - No logo, H.264 source → HLS is H.264 → relay copies (force_copy=False, detected H.264)
+        - No logo, H.265 source → HLS is H.265 → relay transcodes H.265→H.264 (force_copy=False)
+        """
+        if not self.rtmp_target:
+            return
+        await self._wait_hls_ready(timeout=10.0)
+        hls_url = f"http://127.0.0.1:{settings.APP_PORT}/hls/{self.stream_id}/index.m3u8"
+        # If logo is active, output_process already encoded to H.264 — no need to re-probe
+        force_copy = self._has_logo()
+        await self._start_rtmp_relay(hls_url, force_copy=force_copy)
 
     async def _start_rtmp_relay_from_concat(self, concat_path: str):
         """Push DVR loop to RTMP as a separate process. Uses same backoff as live relay."""
