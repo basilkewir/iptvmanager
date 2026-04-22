@@ -325,8 +325,15 @@ class StreamProcess:
         if source_url.lower().startswith("rtsp://"):
             cmd += ["-rtsp_transport", "tcp"]
         else:
-            cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
-                    "-reconnect_delay_max", "5"]
+            # For HLS/HTTP sources: auto-reconnect so the relay NEVER dies on brief hiccups
+            # This keeps MediaMTX's RTSP/HLS output stable (no dropout for Flussonic)
+            cmd += [
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_at_eof", "1",
+                "-reconnect_on_network_error", "1",
+                "-reconnect_delay_max", "5",
+            ]
         cmd += [
             "-fflags", "+genpts+discardcorrupt",
             "-analyzeduration", "2000000",
